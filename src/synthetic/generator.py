@@ -14,8 +14,9 @@ class SyntheticGenerator:
 
     The generator models an unresolved source. Its transit path is a uniform
     stellar disk and circular occultor using the analytic two-circle overlap
-    area. This is a validated baseline for the simulator, not a full
-    limb-darkened stellar surface or planetary microlensing solver.
+    area. Spot, flare, and eclipsing-binary branches are bounded analytic
+    approximations and are labeled as such; they are not full stellar-surface,
+    binary-star, or planetary-microlensing solvers.
     """
 
     RASTER_CHANNELS = (
@@ -52,8 +53,9 @@ class SyntheticGenerator:
         latent_null, latent_injected, event_mask, depth = self._latent_signals(
             mids, starts, ends, wavelengths
         )
+        nuisance_layers = self._nuisance_layers(rng, mids, starts, ends)
         noisy_null, noisy_injected, uncertainty = self._apply_noise(
-            rng, latent_null, latent_injected, exposure_days
+            rng, latent_null, latent_injected, exposure_days, nuisance_layers
         )
         pixel_noise = rng.normal(
             0.0,
@@ -73,6 +75,7 @@ class SyntheticGenerator:
             interpolation,
             wavelength_mask,
             pixel_noise,
+            nuisance_layers,
         )
         injected_raster = self._render_raster(
             noisy_injected,
@@ -81,6 +84,7 @@ class SyntheticGenerator:
             interpolation,
             wavelength_mask,
             pixel_noise,
+            nuisance_layers,
         )
         null_tokens = self._wavelength_tokens(
             noisy_null, uncertainty, wavelength_coordinate, valid_exposure, interpolation, wavelength_mask
@@ -119,7 +123,12 @@ class SyntheticGenerator:
             "pixel_x": config.source_x * (config.raster_width - 1),
             "pixel_y": config.source_y * (config.raster_height - 1),
             "normalization": "robust_baseline_reference_1.0",
+            "provenance": "analytic_synthetic_generator",
+            "parent_observation": None,
+            "nuisance_labels_explicit": True,
+            "time_system": "BJD_TDB",
         }
+        relativity_terms, relativity_metadata = self._relativity_terms(mids)
         return SyntheticBundle(
             null=ObservationView(null_raster, null_tokens, wavelength_mask.copy(), null_labels),
             injected=ObservationView(
@@ -139,6 +148,10 @@ class SyntheticGenerator:
             source_metadata=source_metadata,
             object_metadata=object_metadata,
             labels=injected_labels,
+            nuisance_layers=nuisance_layers,
+            nuisance_metadata=self._nuisance_metadata(),
+            relativity_terms=relativity_terms,
+            relativity_metadata=relativity_metadata,
         )
 
     def _schedule(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -155,6 +168,11 @@ class SyntheticGenerator:
                 )
             mids[visit] = base + np.sort(offsets)
         half = config.exposure_seconds / 172800.0
+        correction_days = (
+            self.config.barycentric_tdb_offset_seconds
+            + self.config.light_time_correction_seconds
+        ) / 86400.0
+        mids += correction_days
         return mids - half, mids, mids + half
 
     def _masks(
@@ -237,7 +255,7 @@ class SyntheticGenerator:
                 injected[..., wavelength_index] = 1.0 - averaged_drop
                 depth[wavelength_index] = float(np.max(averaged_drop))
                 event_mask |= np.max(drop, axis=-1) > 1e-8
-        else:
+        elif config.event_type == "stellar_microlensing":
             epoch = config.start_bjd_tdb + config.microlensing_epoch_offset_days
             delta = self._periodic_delta(sample_times, epoch, config.transit_period_days)
             u = np.sqrt(config.microlensing_u0**2 + (delta / config.microlensing_timescale_days) ** 2)
@@ -246,6 +264,77 @@ class SyntheticGenerator:
             injected[...] = averaged_magnification[..., None]
             depth[:] = np.max(averaged_magnification - 1.0)
             event_mask = np.max(averaged_magnification, axis=-1) > 1.0 + 1e-6
+        elif config.event_type == "stellar_spot_modulation":
+            epoch = config.start_bjd_tdb + config.spot_epoch_offset_days
+            normalized_wavelength = self._centered_wavelength(wavelengths)
+            chromatic_amplitude = config.spot_amplitude * (
+                1.0 + config.spot_wavelength_slope * normalized_wavelength
+            )
+            phase = 2.0 * np.pi * (sample_times - epoch) / config.spot_rotation_period_days
+            modulation = 1.0 - chromatic_amplitude[None, None, None, :] * (
+                0.5 + 0.5 * np.cos(phase[..., None])
+            )
+            injected = np.sum(modulation * weights[..., None], axis=-2)
+            drop = 1.0 - modulation
+            averaged_drop = np.sum(drop * weights[..., None], axis=-2)
+            depth = np.max(averaged_drop, axis=(0, 1))
+            event_mask = np.max(drop, axis=(-1, -2)) > max(config.spot_amplitude * 0.01, 1e-8)
+        elif config.event_type == "flare":
+            epoch = config.start_bjd_tdb + config.flare_epoch_offset_days
+            normalized_wavelength = self._centered_wavelength(wavelengths)
+            chromatic_amplitude = config.flare_amplitude * (
+                1.0 + config.flare_wavelength_slope * normalized_wavelength
+            )
+            delta = sample_times - epoch
+            rise = np.exp(np.minimum(delta, 0.0) / config.flare_rise_days)
+            decay = np.exp(-np.maximum(delta, 0.0) / config.flare_decay_days)
+            flare = (
+                chromatic_amplitude[None, None, None, :]
+                * np.where(delta[..., None] < 0.0, rise[..., None], decay[..., None])
+            )
+            injected = 1.0 + np.sum(flare * weights[..., None], axis=-2)
+            averaged_flare = np.sum(flare * weights[..., None], axis=-2)
+            depth = np.max(averaged_flare, axis=(0, 1))
+            event_mask = np.max(flare, axis=(-1, -2)) > max(config.flare_amplitude * 0.01, 1e-8)
+        else:
+            epoch = config.start_bjd_tdb + config.binary_epoch_offset_days
+            normalized_wavelength = self._centered_wavelength(wavelengths)
+            secondary_flux = config.binary_secondary_flux_ratio * (
+                1.0 + config.binary_secondary_spectral_slope * normalized_wavelength
+            )
+            secondary_flux = np.maximum(secondary_flux, 0.0)
+            total_flux = 1.0 + secondary_flux
+            duration_days = config.binary_duration_hours / 24.0
+            velocity = 2.0 * np.sqrt(
+                max(
+                    (1.0 + config.binary_secondary_radius_ratio) ** 2
+                    - config.binary_impact_parameter**2,
+                    1e-12,
+                )
+            ) / duration_days
+            primary_delta = self._periodic_delta(sample_times, epoch, config.binary_period_days)
+            secondary_delta = self._periodic_delta(
+                sample_times, epoch + 0.5 * config.binary_period_days, config.binary_period_days
+            )
+            primary_separation = np.sqrt(
+                config.binary_impact_parameter**2 + (velocity * primary_delta) ** 2
+            )
+            secondary_separation = np.sqrt(
+                config.binary_impact_parameter**2 + (velocity * secondary_delta) ** 2
+            )
+            primary_overlap = self._circle_overlap_fraction(
+                primary_separation, config.binary_secondary_radius_ratio
+            )
+            secondary_overlap = self._circle_overlap_fraction(
+                secondary_separation, config.binary_secondary_radius_ratio
+            )
+            primary_loss = primary_overlap[..., None] / total_flux
+            secondary_loss = secondary_overlap[..., None] * secondary_flux / total_flux
+            loss = primary_loss + secondary_loss
+            averaged_loss = np.sum(loss * weights[..., None], axis=-2)
+            injected = 1.0 - averaged_loss
+            depth = np.max(averaged_loss, axis=(0, 1))
+            event_mask = np.max(loss, axis=(-1, -2)) > 1e-8
         return null, injected, event_mask, depth
 
     def _apply_noise(
@@ -254,6 +343,7 @@ class SyntheticGenerator:
         latent_null: np.ndarray,
         latent_injected: np.ndarray,
         exposure_days: float,
+        nuisance_layers: dict[str, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         config = self.config
         count_scale = config.source_rate_per_second * config.exposure_seconds
@@ -264,7 +354,8 @@ class SyntheticGenerator:
             previous = config.variability_ar1 * previous + rng.normal(0.0, config.variability_sigma)
             variability[index] = previous
         chromatic = 1.0 + 0.05 * self._normalize_log_wavelength(np.asarray(config.wavelength_nm))
-        baseline = 1.0 + variability[..., None] * chromatic
+        flux_nuisance = self._flux_nuisance(nuisance_layers, variability.shape)
+        baseline = 1.0 + (variability[..., None] * chromatic) + flux_nuisance[..., None]
         expected_counts = np.maximum(count_scale * baseline + background, 1.0)
         poisson_residual = rng.poisson(expected_counts) - expected_counts
         read_residual = rng.normal(0.0, config.read_noise_electrons, size=latent_null.shape)
@@ -282,19 +373,42 @@ class SyntheticGenerator:
         interpolation: np.ndarray,
         wavelength_mask: np.ndarray,
         pixel_noise: np.ndarray,
+        nuisance_layers: dict[str, np.ndarray] | None = None,
     ) -> np.ndarray:
         config = self.config
         height, width = config.raster_height, config.raster_width
         y, x = np.mgrid[0:height, 0:width]
         center_x = config.source_x * (width - 1)
         center_y = config.source_y * (height - 1)
-        psf = np.exp(-0.5 * (((x - center_x) / 1.3) ** 2 + ((y - center_y) / 1.3) ** 2))
-        psf = psf / psf.max()
+        layers = nuisance_layers or {}
+        focus = layers.get("hst_focus_psf", np.zeros(measurements.shape[:2]))
+        jitter = layers.get(
+            "pointing_jitter", np.zeros((*measurements.shape[:2], 2), dtype=np.float64)
+        )
+        drift = layers.get(
+            "pointing_drift", np.zeros((*measurements.shape[:2], 2), dtype=np.float64)
+        )
+        sigma = np.maximum(1.3 * (1.0 + focus), 0.25)
+        shifted_x = x[None, None] - center_x - jitter[..., 0, None, None] - drift[..., 0, None, None]
+        shifted_y = y[None, None] - center_y - jitter[..., 1, None, None] - drift[..., 1, None, None]
+        psf = np.exp(-0.5 * ((shifted_x / sigma[..., None, None]) ** 2 + (shifted_y / sigma[..., None, None]) ** 2))
+        psf /= np.maximum(psf.max(axis=(-1, -2), keepdims=True), 1e-8)
         baseline = 1.0 + config.source_contrast * psf
         scalar = measurements.mean(axis=-1)
         scalar_uncertainty = uncertainty.mean(axis=-1)
-        physical = 1.0 + config.source_contrast * psf[None, None] * scalar[..., None, None] + pixel_noise
-        residual = (physical - baseline[None, None]) / np.maximum(
+        spatial = layers.get("pixel_area_map", np.zeros((height, width), dtype=np.float64))[None, None]
+        spatial = spatial + layers.get(
+            "radiation_hot_pixels", np.zeros_like(pixel_noise)
+        ) + layers.get("cosmic_ray", np.zeros_like(pixel_noise))
+        geometric = layers.get("geometric_distortion", np.zeros(measurements.shape[:2]))
+        physical = (
+            1.0
+            + config.source_contrast * psf * scalar[..., None, None]
+            + pixel_noise
+            + spatial
+            + geometric[..., None, None]
+        )
+        residual = (physical - baseline * (1.0 + geometric[..., None, None])) / np.maximum(
             scalar_uncertainty[..., None, None] + 0.0002, 1e-8
         )
         uncertainty_map = np.broadcast_to(
@@ -308,6 +422,176 @@ class SyntheticGenerator:
         ).astype(np.float32)
         raster *= np.where(valid_map[:, :, None], 1.0, np.array([0, 0, 1, 0, 0, 0], dtype=np.float32)[None, None, :, None, None])
         return raster
+
+    def _nuisance_layers(
+        self,
+        rng: np.random.Generator,
+        mids: np.ndarray,
+        starts: np.ndarray,
+        ends: np.ndarray,
+    ) -> dict[str, np.ndarray]:
+        """Create shared, labeled nuisance layers with bounded NumPy arrays.
+
+        These are domain-randomizable approximations intended for pretraining.
+        They are not a replacement for calibration with real HST/Kepler data.
+        Detector losses and throughput-like terms are instrument nuisances, not
+        relativistic corrections; the latter are returned separately.
+        """
+
+        config = self.config
+        shape = mids.shape
+        phase = 2.0 * np.pi * (mids - config.start_bjd_tdb) / max(
+            config.visit_spacing_days * max(config.visits, 1), 1e-8
+        )
+        layers: dict[str, np.ndarray] = {
+            "hst_thermal_breathing": (
+                config.hst_thermal_breathing_amplitude * np.sin(phase)
+            ).astype(np.float32),
+            "hst_focus_psf": (
+                config.hst_focus_psf_amplitude * np.sin(phase + 0.7)
+            ).astype(np.float32),
+            "pointing_jitter": rng.normal(
+                0.0, config.pointing_jitter_pixels, size=(*shape, 2)
+            ).astype(np.float32),
+            "pointing_drift": np.stack(
+                (
+                    config.drift_pixels_per_visit
+                    * np.arange(config.visits, dtype=np.float64)[:, None]
+                    / max(config.visits - 1, 1)
+                    * np.ones(shape, dtype=np.float64),
+                    np.zeros(shape, dtype=np.float64),
+                ),
+                axis=-1,
+            ).astype(np.float32),
+            "roll": (
+                config.roll_amplitude_deg * np.sin(phase + 0.3)
+            ).astype(np.float32),
+            "aberration": (
+                config.aberration_amplitude * np.cos(phase + 1.1)
+            ).astype(np.float32),
+            "geometric_distortion": (
+                config.geometric_distortion_amplitude * np.sin(phase + 0.4)
+            ).astype(np.float32),
+            "pixel_area_map": self._pixel_area_map(config.pam_gradient_amplitude),
+            "uvis_cte_loss": np.full(
+                shape, config.uvis_cte_loss_fraction, dtype=np.float32
+            ),
+            "radiation_hot_pixels": self._sparse_hot_pixels(rng, config.radiation_hot_pixel_rate),
+            "ir_persistence": np.zeros(shape, dtype=np.float32),
+            "ir_nonlinearity": np.full(
+                shape, config.ir_nonlinearity_amplitude, dtype=np.float32
+            ),
+            "cosmic_ray": self._sparse_cosmic_rays(rng, config.cosmic_ray_rate),
+            "shutter": (
+                config.shutter_artifact_amplitude
+                * np.clip((ends - starts) / max(config.exposure_seconds / 86400.0, 1e-12), 0.0, 1.0)
+            ).astype(np.float32),
+            "kepler_quarterly_roll": (
+                config.kepler_quarterly_roll_amplitude
+                * np.sin(2.0 * np.pi * np.arange(config.visits)[:, None] / 4.0)
+                * np.ones(shape, dtype=np.float64)
+            ).astype(np.float32),
+            "kepler_pointing": rng.normal(
+                0.0, config.kepler_pointing_amplitude, size=shape
+            ).astype(np.float32),
+            "kepler_thermal": (
+                config.kepler_thermal_amplitude * np.cos(phase / 2.0)
+            ).astype(np.float32),
+            "kepler_impulsive": self._impulsive_layer(rng, config.kepler_impulsive_rate),
+            "cbv_common_mode": (
+                config.cbv_common_mode_amplitude * np.sin(phase / 3.0 + 0.2)
+            ).astype(np.float32),
+        }
+        persistence = layers["ir_persistence"]
+        if config.ir_persistence_amplitude:
+            persistence[:, 1:] = config.ir_persistence_amplitude * np.maximum(
+                0.0, layers["hst_thermal_breathing"][:, :-1]
+            )
+        return layers
+
+    def _flux_nuisance(
+        self, layers: dict[str, np.ndarray] | None, shape: tuple[int, int]
+    ) -> np.ndarray:
+        if not layers:
+            return np.zeros(shape, dtype=np.float64)
+        return np.asarray(
+            layers["hst_thermal_breathing"]
+            + layers["aberration"]
+            + layers["uvis_cte_loss"] * -1.0
+            + layers["ir_persistence"]
+            + layers["ir_nonlinearity"]
+            + layers["shutter"]
+            + layers["kepler_quarterly_roll"]
+            + layers["kepler_pointing"]
+            + layers["kepler_thermal"]
+            + layers["kepler_impulsive"]
+            + layers["cbv_common_mode"],
+            dtype=np.float64,
+        )
+
+    def _relativity_terms(
+        self, mids: np.ndarray
+    ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+        config = self.config
+        return (
+            {
+                "barycentric_tdb_offset_seconds": np.full(
+                    mids.shape, config.barycentric_tdb_offset_seconds, dtype=np.float32
+                ),
+                "light_time_correction_seconds": np.full(
+                    mids.shape, config.light_time_correction_seconds, dtype=np.float32
+                ),
+                "apparent_position_shift_arcsec": np.broadcast_to(
+                    np.array([config.apparent_position_shift_arcsec, 0.0], dtype=np.float32),
+                    (*mids.shape, 2),
+                ).copy(),
+            },
+            {
+                "time_system": "BJD_TDB",
+                "implementation": "constant_analytic_terms",
+                "detector_losses_are_relativistic": False,
+                "scope": "metadata_and_schedule_hook_only",
+            },
+        )
+
+    def _nuisance_metadata(self) -> dict[str, dict[str, object]]:
+        names = (
+            "hst_thermal_breathing", "hst_focus_psf", "pointing_jitter", "pointing_drift",
+            "roll", "aberration", "geometric_distortion", "pixel_area_map", "uvis_cte_loss",
+            "radiation_hot_pixels", "ir_persistence", "ir_nonlinearity", "cosmic_ray", "shutter",
+            "kepler_quarterly_roll", "kepler_pointing", "kepler_thermal", "kepler_impulsive",
+            "cbv_common_mode",
+        )
+        return {
+            name: {
+                "kind": "instrument_or_sampling_nuisance",
+                "domain_randomizable": True,
+                "implementation": "bounded_analytic_approximation",
+                "scientific_status": "pretraining_prior_requires_real_data_calibration",
+            }
+            for name in names
+        }
+
+    def _pixel_area_map(self, amplitude: float) -> np.ndarray:
+        y, x = np.mgrid[0 : self.config.raster_height, 0 : self.config.raster_width]
+        x_norm = (x / max(self.config.raster_width - 1, 1)) - 0.5
+        return (amplitude * x_norm).astype(np.float32)
+
+    def _sparse_hot_pixels(self, rng: np.random.Generator, rate: float) -> np.ndarray:
+        shape = (self.config.visits, self.config.local_steps, self.config.raster_height, self.config.raster_width)
+        mask = rng.random(shape) < rate
+        return (mask * -0.05).astype(np.float32)
+
+    def _sparse_cosmic_rays(self, rng: np.random.Generator, rate: float) -> np.ndarray:
+        shape = (self.config.visits, self.config.local_steps, self.config.raster_height, self.config.raster_width)
+        mask = rng.random(shape) < rate
+        amplitudes = rng.uniform(0.1, 0.5, size=shape)
+        return (mask * amplitudes).astype(np.float32)
+
+    def _impulsive_layer(self, rng: np.random.Generator, rate: float) -> np.ndarray:
+        shape = (self.config.visits, self.config.local_steps)
+        mask = rng.random(shape) < rate
+        return (mask * rng.uniform(-0.02, 0.02, size=shape)).astype(np.float32)
 
     def _wavelength_tokens(
         self,
@@ -372,11 +656,7 @@ class SyntheticGenerator:
         config = self.config
         visits, steps = mids.shape
         delta = np.diff(mids, axis=1, prepend=mids[:, :1])
-        event_epoch = config.start_bjd_tdb + (
-            config.transit_epoch_offset_days
-            if config.event_type == "transit"
-            else config.microlensing_epoch_offset_days
-        )
+        event_epoch = self._event_epoch()
         geometry_base = np.array([1.0, 0.0, 0.0, 0.0, 0.017, 0.0, 180.0 / 180.0, 20.0 / 90.0, 0.0, 0.0])
         geometry = np.broadcast_to(geometry_base, (visits, steps, 10)).copy().astype(np.float32)
         geometry[..., 9] = (mids - event_epoch).astype(np.float32)
@@ -425,11 +705,8 @@ class SyntheticGenerator:
         mids: np.ndarray,
     ) -> EventLabels:
         config = self.config
-        epoch = config.start_bjd_tdb + (
-            config.transit_epoch_offset_days
-            if config.event_type == "transit"
-            else config.microlensing_epoch_offset_days
-        )
+        epoch = self._event_epoch()
+        duration, semantics = self._event_duration_and_semantics()
         return EventLabels(
             event_type=config.event_type if latent_positive else "null",
             source_id="synthetic-host-0001",
@@ -438,16 +715,42 @@ class SyntheticGenerator:
             injection_seed=injection_seed,
             transit_depth=depth.astype(np.float32),
             event_midpoint_bjd_tdb=float(epoch),
-            event_duration_days=float(
-                config.transit_duration_hours / 24.0
-                if config.event_type == "transit"
-                else config.microlensing_timescale_days
-            ),
+            event_duration_days=float(duration),
             microlensing_solver_tier=(
-                "not_applicable" if config.event_type == "transit" else "point_lens_analytic"
+                "point_lens_analytic"
+                if config.event_type == "stellar_microlensing"
+                else "not_applicable"
             ),
             parameter_constraint_status="unconstrained" if not latent_positive else "weakly_constrained",
+            event_semantics="no_injection" if not latent_positive else semantics,
         )
+
+    def _event_epoch(self) -> float:
+        config = self.config
+        offsets = {
+            "transit": config.transit_epoch_offset_days,
+            "stellar_microlensing": config.microlensing_epoch_offset_days,
+            "stellar_spot_modulation": config.spot_epoch_offset_days,
+            "flare": config.flare_epoch_offset_days,
+            "eclipsing_binary": config.binary_epoch_offset_days,
+        }
+        return config.start_bjd_tdb + offsets[config.event_type]
+
+    def _event_duration_and_semantics(self) -> tuple[float, str]:
+        config = self.config
+        if config.event_type == "transit":
+            return config.transit_duration_hours / 24.0, "midpoint"
+        if config.event_type == "stellar_microlensing":
+            return config.microlensing_timescale_days, "point_lens_peak"
+        if config.event_type == "stellar_spot_modulation":
+            return config.spot_rotation_period_days, "persistent_modulation"
+        if config.event_type == "flare":
+            return config.flare_rise_days + config.flare_decay_days, "injected_peak"
+        return config.binary_duration_hours / 24.0, "uniform_disk_eclipse_approximation"
+
+    @staticmethod
+    def _centered_wavelength(wavelengths: np.ndarray) -> np.ndarray:
+        return (wavelengths - wavelengths.mean()) / max(np.ptp(wavelengths), 1.0)
 
     @staticmethod
     def _normalize_log_wavelength(wavelengths: np.ndarray) -> np.ndarray:

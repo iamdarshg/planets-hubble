@@ -1077,6 +1077,43 @@ out-of-distribution observation
 
 ## 11. Labels and training data
 
+### 11.1 Synthetic pretraining and real-observation post-training
+
+Synthetic observation bundles are the pretraining curriculum. Real Hubble
+images and their associated calibration/engineering products are retained in
+an external data store and reserved for post-training fine-tuning and held-out
+evaluation. Large real-image payloads must not be committed to this
+repository; manifests, provenance, hashes, and retrieval instructions are the
+versioned interface.
+
+The split boundary is by source/system and observation lineage. No exposure,
+near-duplicate, or parent observation may cross from real calibration data into
+the held-out evaluation set. Synthetic generation must expose a causal layer
+manifest so astrophysical signal, instrument effects, orbital/pointing
+behavior, timing corrections, and noise can be independently randomized or
+replayed.
+
+Synthetic pretraining must include realistic nuisance families rather than
+only independent Gaussian noise. The HST-first curriculum should include
+thermal focus breathing, pointing jitter/drift/roll, field-dependent PSF and
+geometric aberration, UVIS CTE loss, IR persistence and nonlinearity, cosmic
+rays, hot pixels, saturation, shutter effects, background/stray light, and
+time-dependent sensitivity. Kepler/K2-derived pretraining domains should
+include quarterly rolls, channel response, target-pixel/aperture changes,
+thermal and pointing trends, impulsive systematics, and common-mode/cotrending
+features. Each nuisance layer must carry an instrument/epoch and
+measured-vs-approximation provenance label.
+
+Timing and three-dimensional context must remain physically separated:
+barycentric TDB/light-time and apparent-position corrections are timing and
+geometry features; distance dilution, dust extinction, throughput, PSF losses,
+detector losses, and saturation are photometric/instrument layers. A 3D
+galaxy/scene map may condition distance, extinction, foreground/background
+ordering, mass priors, and lens geometry, but must not become a catalog shortcut
+for the planet label. Strong-field relativistic light bending or delay is an
+optional, explicitly tiered effect and must not be fabricated for ordinary HST
+fields where it is below the error budget.
+
 Confirmed planets and host coordinates will be sourced from the NASA
 Exoplanet Archive, especially its Planetary Systems and Planetary Systems
 Composite Parameters tables.

@@ -700,6 +700,116 @@ particular, do not claim Hubble archival completeness for planetary microlensing
 from a simulator alone, and do not report unconstrained orbital elements as
 measurements.
 
+## 9.1 Pretraining, real-image post-training, and holdout policy
+
+Synthetic data is the pretraining domain, not the final evidence domain. The
+training lifecycle is:
+
+```text
+synthetic curriculum
+    -> synthetic validation
+    -> frozen real HST post-training/fine-tuning set
+    -> real HST held-out evaluation
+```
+
+Real images, calibration products, jitter/engineering files, and their hashes
+must be retained outside the source repository in the configured data store.
+The repository should contain manifests, provenance, and checksums rather than
+large FITS/image payloads. The real-image post-training and evaluation split
+must be made by source/system and observation lineage, with no parent exposure
+or near-duplicate image appearing in synthetic calibration and evaluation.
+
+Synthetic examples must carry a causal layer manifest, for example:
+
+```text
+astrophysical_signal
+stellar_variability
+spectral_response
+exposure_integration
+optical_psf_and_aberration
+pointing_and_jitter
+detector_effects
+background_and_crowding
+timing_and_observer_geometry
+noise_realization
+```
+
+Each layer can be disabled, randomized, or replayed from a real parent. This
+lets us measure whether the model learned a transit rather than a telescope
+or a simulator fingerprint.
+
+## 9.2 Instrument-realistic nuisance curriculum
+
+The simulator should use instrument-specific nuisance families and should not
+collapse every loss into an undifferentiated Gaussian noise term.
+
+For Hubble/WFC3 and related imaging data, the initial nuisance vocabulary is:
+
+* orbital thermal breathing: focus-dependent PSF width, asymmetry, and
+  centroid changes;
+* fine-guidance jitter, drift, roll, guide-star acquisition state, and visit
+  offsets, including a jitter-file replay path;
+* field-dependent optical aberration and geometric distortion, including
+  pixel-area-map effects when using flat-fielded detector products;
+* UVIS radiation damage and position/morphology-dependent CTE charge loss;
+* IR persistence/afterglow after high-fluence exposures and detector
+  nonlinearity along the read ramp;
+* cosmic-ray hits, hot pixels, bad columns, saturation, background gradients,
+  stray light, and shutter-dependent blur where relevant;
+* time-dependent sensitivity and amplifier/flat-field residuals.
+
+These are documented HST behaviors, not arbitrary augmentations. The simulator
+should draw their amplitudes from instrument/epoch strata or replay measured
+residual templates. If no calibration distribution is available, the layer is
+marked `approximation` or `OOD` and is not silently treated as HST truth.
+
+For Kepler/K2-like pretraining domains, include the quarterly roll/season
+state, channel/module-dependent response, target-pixel and aperture changes,
+thermal/pointing trends, cosmic rays, impulsive spikes, and common-mode
+systematics. A co-trending-basis-vector-like layer may be used as a nuisance
+representation, but it must be labelled as a correction/systematics feature
+and not as an astrophysical signal. Kepler-derived examples remain a separate
+instrument domain until the HST-to-Kepler transfer behavior is measured.
+
+## 9.3 Timing, relativity, extinction, and three-dimensional context
+
+The phrase “relativistic loss” must be decomposed into physically distinct
+effects:
+
+1. Convert observation times through declared UTC/TAI/TT/TDB scales and retain
+   exposure start, midpoint, and end. Use barycentric light-travel-time
+   corrections for event timing; use JPL ephemerides when their accuracy is
+   needed.
+2. Retain apparent-position terms from observer motion, including stellar
+   aberration and one-way light time. General-relativistic light bending and
+   gravitational delay are separate optional terms and must not be implied by
+   a Newtonian aberration correction.
+3. Apply distance dilution, wavelength-dependent interstellar extinction and
+   scattering, telescope throughput, PSF/aperture losses, detector quantum
+   efficiency, CTE loss, persistence, and saturation as separate causal layers.
+   These are not relativistic effects.
+4. Use a three-dimensional scene/context map to provide source and lens
+   distances, proper motions, dust/extinction along the line of sight,
+   foreground/background ordering probabilities, and mass/redshift priors.
+   A 3D map may condition a lensing calculation; it must not be used as a
+   shortcut label for whether an event is a planet.
+
+For every generated example, store the correction tier and provenance:
+
+```text
+timing_scale: BJD_TDB
+observer_state_source: declared ephemeris or synthetic orbit
+light_time_model: none | solar_system_barycentric | finite_distance
+aberration_model: none | apparent_newtonian | validated_relativistic
+extinction_model: none | catalog_map | synthetic_3d_dust
+instrument_effect_tier: measured_replay | calibrated_approximation | OOD
+```
+
+The implementation should begin with barycentric timing and observer-state
+features, then add dust and lens geometry. It should not invent a strong-field
+relativity signal for ordinary HST exoplanet fields where the expected effect
+is below the photometric/timing error budget.
+
 ## 10. References
 
 The links below are the primary or first-party references used for the design.
@@ -751,6 +861,22 @@ The links below are the primary or first-party references used for the design.
     Parameters Data Column Definitions.” [Official documentation](https://exoplanetarchive.ipac.caltech.edu/docs/API_PS_columns.html).
 21. NASA, *Exoplanet Science Strategy*, microlensing section.
     [Official strategy PDF](https://science.nasa.gov/wp-content/uploads/2023/05/3a.201809_ExoplanetScienceStrategy.pdf).
+22. STScI, *WFC3 Data Handbook*, persistence in WFC3/IR.
+    [Official persistence documentation](https://hst-docs.stsci.edu/wfc3dhb/chapter-8-persistence-in-wfc3-ir/8-1-persistence-in-wfc3-ir).
+23. STScI, *WFC3 Data Handbook*, UVIS calibration and CTE.
+    [Official UVIS calibration documentation](https://hst-docs.stsci.edu/wfc3dhb/chapter-3-wfc3-data-calibration/3-2-uvis-data-calibration-steps).
+24. STScI, *WFC3 Instrument Handbook*, optical performance and breathing.
+    [Official optical-performance documentation](https://hst-docs.stsci.edu/wfc3ihb/chapter-6-uvis-imaging-with-wfc3/6-6-uvis-optical-performance).
+25. STScI, *DrizzlePac Handbook*, HST pointing accuracy and stability.
+    [Official pointing documentation](https://hst-docs.stsci.edu/drizzpac/chapter-4-astrometric-information-in-the-header/4-4-hst-pointing-accuracy-and-stability).
+26. NASA Exoplanet Archive, *Kepler Data Products Overview*.
+    [Official Kepler product documentation](https://exoplanetarchive.ipac.caltech.edu/docs/Kepler_Data_Products_Overview.html).
+27. Astropy, *Time and Dates*, barycentric and heliocentric light-travel-time corrections.
+    [Official time documentation](https://docs.astropy.org/en/stable/time/index.html).
+28. JPL NAIF, *Aberration Corrections Required Reading*.
+    [Official SPICE aberration documentation](https://naif.jpl.nasa.gov/pub/naif/toolkit_docs/FORTRAN/req/abcorr.html).
+29. ESA Gaia, *Total Galactic Extinction maps*.
+    [Official Gaia extinction-map documentation](https://www.cosmos.esa.int/web/gaia/dr3-extinction-as-function-of-l-b).
 
 ## Conclusion
 

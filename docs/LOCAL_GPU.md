@@ -44,6 +44,22 @@ appropriate for a local functional check. The measured research preset is
 approximately 84.0M parameters and is construction-tested, but it has not
 yet been trained to convergence.
 
+The research preset has also completed a local-GPU inference probe using one
+full-resolution frame:
+
+```text
+parameters:             84,004,564
+input:                  [1, 1, 1, 6, 720, 1280]
+AMP:                    bfloat16
+heatmap:                [1, 1, 1, 16, 6, 90, 160]
+finite output:          true
+peak CUDA allocated:    approximately 489.78 MiB
+peak CUDA reserved:     approximately 610.00 MiB
+```
+
+This is inference evidence only. It does not establish that the 84M model
+fits a multi-batch training run or that it has learned exoplanet detection.
+
 ## Resource-cap result
 
 The requested caps are 720 MB process RSS and 5 GB storage. Streaming and

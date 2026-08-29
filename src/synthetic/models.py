@@ -59,6 +59,44 @@ class SyntheticConfig:
     microlensing_u0: float = 0.1
     microlensing_timescale_days: float = 10.0
     microlensing_epoch_offset_days: float = 0.06
+    spot_rotation_period_days: float = 12.0
+    spot_epoch_offset_days: float = 0.06
+    spot_amplitude: float = 0.01
+    spot_wavelength_slope: float = 0.2
+    flare_epoch_offset_days: float = 0.12
+    flare_amplitude: float = 0.2
+    flare_rise_days: float = 0.01
+    flare_decay_days: float = 0.05
+    flare_wavelength_slope: float = 0.5
+    binary_period_days: float = 5.0
+    binary_epoch_offset_days: float = 0.06
+    binary_duration_hours: float = 3.0
+    binary_impact_parameter: float = 0.0
+    binary_secondary_radius_ratio: float = 0.3
+    binary_secondary_flux_ratio: float = 0.2
+    binary_secondary_spectral_slope: float = 0.0
+    hst_thermal_breathing_amplitude: float = 0.0
+    hst_focus_psf_amplitude: float = 0.0
+    pointing_jitter_pixels: float = 0.0
+    drift_pixels_per_visit: float = 0.0
+    roll_amplitude_deg: float = 0.0
+    aberration_amplitude: float = 0.0
+    geometric_distortion_amplitude: float = 0.0
+    pam_gradient_amplitude: float = 0.0
+    uvis_cte_loss_fraction: float = 0.0
+    radiation_hot_pixel_rate: float = 0.0
+    ir_persistence_amplitude: float = 0.0
+    ir_nonlinearity_amplitude: float = 0.0
+    cosmic_ray_rate: float = 0.0
+    shutter_artifact_amplitude: float = 0.0
+    kepler_quarterly_roll_amplitude: float = 0.0
+    kepler_pointing_amplitude: float = 0.0
+    kepler_thermal_amplitude: float = 0.0
+    kepler_impulsive_rate: float = 0.0
+    cbv_common_mode_amplitude: float = 0.0
+    barycentric_tdb_offset_seconds: float = 0.0
+    light_time_correction_seconds: float = 0.0
+    apparent_position_shift_arcsec: float = 0.0
 
     def __post_init__(self) -> None:
         positive_ints = (self.visits, self.local_steps, self.raster_height, self.raster_width)
@@ -77,13 +115,55 @@ class SyntheticConfig:
                 self.transit_radius_ratio,
                 self.source_rate_per_second,
                 self.background_rate_per_second,
+                self.spot_rotation_period_days,
+                self.flare_rise_days,
+                self.flare_decay_days,
+                self.binary_period_days,
+                self.binary_duration_hours,
+                self.binary_secondary_radius_ratio,
             )
         ):
             raise ValueError("physical scales must be positive")
+        if self.spot_amplitude < 0.0 or self.flare_amplitude < 0.0:
+            raise ValueError("spot and flare amplitudes must be non-negative")
+        if self.binary_secondary_flux_ratio < 0.0:
+            raise ValueError("binary_secondary_flux_ratio must be non-negative")
+        nonnegative_nuisances = (
+            self.hst_thermal_breathing_amplitude,
+            self.hst_focus_psf_amplitude,
+            self.pointing_jitter_pixels,
+            self.drift_pixels_per_visit,
+            self.roll_amplitude_deg,
+            self.aberration_amplitude,
+            self.geometric_distortion_amplitude,
+            self.pam_gradient_amplitude,
+            self.uvis_cte_loss_fraction,
+            self.radiation_hot_pixel_rate,
+            self.ir_persistence_amplitude,
+            self.ir_nonlinearity_amplitude,
+            self.cosmic_ray_rate,
+            self.shutter_artifact_amplitude,
+            self.kepler_quarterly_roll_amplitude,
+            self.kepler_pointing_amplitude,
+            self.kepler_thermal_amplitude,
+            self.kepler_impulsive_rate,
+            self.cbv_common_mode_amplitude,
+        )
+        if any(value < 0.0 for value in nonnegative_nuisances):
+            raise ValueError("nuisance amplitudes and rates must be non-negative")
+        for rate in (
+            self.radiation_hot_pixel_rate,
+            self.cosmic_ray_rate,
+            self.kepler_impulsive_rate,
+        ):
+            if rate > 1.0:
+                raise ValueError("sparse nuisance rates must be in [0, 1]")
         if self.quadrature_order < 2:
             raise ValueError("quadrature_order must be at least two")
         if not 0.0 <= self.transit_impact_parameter < 1.0:
             raise ValueError("transit_impact_parameter must be in [0, 1)")
+        if not 0.0 <= self.binary_impact_parameter < 1.0:
+            raise ValueError("binary_impact_parameter must be in [0, 1)")
         for fraction in (
             self.invalid_fraction,
             self.interpolation_fraction,
@@ -91,8 +171,17 @@ class SyntheticConfig:
         ):
             if not 0.0 <= fraction <= 1.0:
                 raise ValueError("dropout fractions must be in [0, 1]")
-        if self.event_type not in {"transit", "stellar_microlensing"}:
-            raise ValueError("event_type must be transit or stellar_microlensing")
+        if self.event_type not in {
+            "transit",
+            "stellar_microlensing",
+            "stellar_spot_modulation",
+            "flare",
+            "eclipsing_binary",
+        }:
+            raise ValueError(
+                "event_type must be transit, stellar_microlensing, "
+                "stellar_spot_modulation, flare, or eclipsing_binary"
+            )
 
 
 @dataclass
@@ -109,6 +198,7 @@ class EventLabels:
     event_duration_days: float
     microlensing_solver_tier: str
     parameter_constraint_status: str = "weakly_constrained"
+    event_semantics: str = "midpoint"
 
 
 @dataclass
@@ -147,6 +237,10 @@ class SyntheticBundle:
     source_metadata: dict[str, object] = field(default_factory=dict)
     object_metadata: Tuple[dict[str, object], ...] = ()
     labels: EventLabels | None = None
+    nuisance_layers: dict[str, np.ndarray] = field(default_factory=dict)
+    nuisance_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    relativity_terms: dict[str, np.ndarray] = field(default_factory=dict)
+    relativity_metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def nbytes(self) -> int:
@@ -163,7 +257,13 @@ class SyntheticBundle:
             self.local_time,
             self.long_time,
         )
-        return int(self.null.nbytes + self.injected.nbytes + sum(array.nbytes for array in arrays))
+        return int(
+            self.null.nbytes
+            + self.injected.nbytes
+            + sum(array.nbytes for array in arrays)
+            + sum(array.nbytes for array in self.nuisance_layers.values())
+            + sum(array.nbytes for array in self.relativity_terms.values())
+        )
 
     def as_model_numpy(self, view: str = "injected") -> dict[str, np.ndarray]:
         """Return a batch-one mapping matching ``AstroMambaHInputs`` shapes."""
