@@ -388,9 +388,20 @@ class SyntheticGenerator:
         drift = layers.get(
             "pointing_drift", np.zeros((*measurements.shape[:2], 2), dtype=np.float64)
         )
+        roll = layers.get("roll", np.zeros(measurements.shape[:2], dtype=np.float64))
+        roll += np.rad2deg(
+            layers.get("kepler_quarterly_roll", np.zeros(measurements.shape[:2], dtype=np.float64))
+        )
         sigma = np.maximum(1.3 * (1.0 + focus), 0.25)
-        shifted_x = x[None, None] - center_x - jitter[..., 0, None, None] - drift[..., 0, None, None]
-        shifted_y = y[None, None] - center_y - jitter[..., 1, None, None] - drift[..., 1, None, None]
+        field_center_x = 0.5 * (width - 1)
+        field_center_y = 0.5 * (height - 1)
+        source_offset_x = center_x - field_center_x
+        source_offset_y = center_y - field_center_y
+        theta = np.deg2rad(roll)
+        rolled_source_x = field_center_x + np.cos(theta) * source_offset_x - np.sin(theta) * source_offset_y
+        rolled_source_y = field_center_y + np.sin(theta) * source_offset_x + np.cos(theta) * source_offset_y
+        shifted_x = x[None, None] - rolled_source_x[..., None, None] - jitter[..., 0, None, None] - drift[..., 0, None, None]
+        shifted_y = y[None, None] - rolled_source_y[..., None, None] - jitter[..., 1, None, None] - drift[..., 1, None, None]
         psf = np.exp(-0.5 * ((shifted_x / sigma[..., None, None]) ** 2 + (shifted_y / sigma[..., None, None]) ** 2))
         psf /= np.maximum(psf.max(axis=(-1, -2), keepdims=True), 1e-8)
         baseline = 1.0 + config.source_contrast * psf
