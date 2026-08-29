@@ -1182,3 +1182,32 @@ split.
   for a meaningful planetary-perturbation training set?
 - Should the first output be a source heatmap, coordinate-query records, or
   both in a shared model?
+
+## 14. Implemented synthetic-v2 boundary
+
+The repository now contains an opt-in parent-conditioned implementation in
+addition to the bounded R0 generator. `RealObservationParent` preserves
+loaded science, uncertainty, DQ, WCS/pointing, observer state, detector
+history, and exact BJD_TDB exposure windows. `ObservationScheduleSampler`
+replays those windows or resamples whole visits without inventing independent
+cadence jitter.
+
+`PopulationSampler` draws a coupled stellar/event system: stellar mass drives
+bounded radius and temperature relations, orbital period and mass determine
+semi-major axis, and transit duration is derived from the resulting geometry.
+`PsfProvider` prefers caller-supplied empirical kernels and otherwise returns
+an explicitly labeled wavelength/focus/position/jitter-aware optical
+approximation. `WFC3UVISSimulator` and `WFC3IRSimulator` are separate; the IR
+path includes nondestructive MULTIACCUM reads and history-dependent
+persistence. `RealParentInjector` changes only the astrophysical source
+signal and emits transit times, while preserving the parent’s uncertainty and
+DQ arrays. `HubbleSyntheticV2` and
+`iter_parented_synthetic_training_batches` expose this path to lazy model
+training.
+
+This implementation reaches the bounded R4 contract, not R5. RAW/IMA-level
+injection through CRDS, `calwf3`, AstroDrizzle, external empirical PSF assets,
+and real FITS loading require separately installed STScI software, reference
+files, and archive data. Those external assets must be versioned by manifest,
+hash, and provenance, not committed to Git. See
+[`docs/HUBBLE_SYNTHETIC_V2.md`](docs/HUBBLE_SYNTHETIC_V2.md).

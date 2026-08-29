@@ -10,7 +10,10 @@ This repository currently provides three connected layers:
 
 1. MAST REST discovery and normalized observation manifests.
 2. Bounded streaming plus lazy synthetic pretraining batches.
-3. AstroMamba-H model construction, heatmap/orbit outputs, and local CUDA
+3. Parent-conditioned Hubble Synthetic V2: exact cadence replay, coupled
+   population draws, empirical-first PSFs, UVIS/IR detector contracts, and
+   real-parent transit injection.
+4. AstroMamba-H model construction, heatmap/orbit outputs, and local CUDA
    validation.
 
 The project is not an exoplanet-confirmation system. A model score is a
@@ -61,6 +64,14 @@ training set. Synthetic observations are for pretraining and controlled
 ablation. Real Hubble products are reserved for post-training/fine-tuning and
 held-out evaluation; large real FITS files should remain in external storage,
 with manifests, hashes, and provenance retained in the repository.
+
+For the realism-upgraded path, construct a `RealObservationParent` from loaded
+MAST/FITS products and use `HubbleSyntheticV2` or
+`iter_parented_synthetic_training_batches`. This path replays the parent’s
+actual exposure windows and detector mode, and changes only the astrophysical
+injection. See [`docs/HUBBLE_SYNTHETIC_V2.md`](docs/HUBBLE_SYNTHETIC_V2.md) for
+the R0-R5 boundary. The repository does not claim to bundle `calwf3`, CRDS
+reference files, AstroDrizzle, or large empirical PSF/archive assets.
 
 ## Model and GPU smoke tests
 
@@ -113,6 +124,8 @@ installation, within the revised host-RSS ceiling. See
 - [`SPEC.md`](SPEC.md): top-level system and model specification.
 - [`docs/SYNTHETIC_DATA.md`](docs/SYNTHETIC_DATA.md): simulator curriculum,
   nuisance taxonomy, timing policy, and real-data holdout policy.
+- [`docs/HUBBLE_SYNTHETIC_V2.md`](docs/HUBBLE_SYNTHETIC_V2.md): implemented
+  parent-conditioned simulator path and R0-R5 capability boundary.
 - [`docs/LOCAL_GPU.md`](docs/LOCAL_GPU.md): executable local-GPU evidence and
   resource measurements.
 

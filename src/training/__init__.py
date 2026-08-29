@@ -23,7 +23,7 @@ from .harness import (
     process_rss_bytes,
     resolve_device,
 )
-from .synthetic import iter_synthetic_training_batches
+from .synthetic import iter_parented_synthetic_training_batches, iter_synthetic_training_batches
 
 __all__ = [
     "BoundedTrainer",
@@ -41,6 +41,7 @@ __all__ = [
     "amp_supported",
     "default_loss_fn",
     "iter_synthetic_training_batches",
+    "iter_parented_synthetic_training_batches",
     "make_tiny_adapter_batch",
     "make_tiny_astromamba_batch",
     "process_rss_bytes",
