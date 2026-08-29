@@ -685,6 +685,15 @@ observer states, coverage maps, and period constraint labels. Train a simple
 matched-filter/BLS-like and transparent classifier baseline before the full
 AstroMamba-H design.
 
+The executable pretraining bridge is
+`training.iter_synthetic_training_batches`. It generates one full-resolution
+720x1280 bundle at a time, alternates null and injected views, converts the
+selected view into `AstroMambaHInputs`, and yields a bounded training batch.
+It does not retain a dataset-wide array cache. The standalone
+`SyntheticGenerator` continues to support smaller rasters for fast physics
+tests and stress checks; full resolution is required at the model-training
+boundary.
+
 ### Milestone D: microlensing auxiliary branch
 
 Add point-lens pretraining, then finite-source binary-lens planetary

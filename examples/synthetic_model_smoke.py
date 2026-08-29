@@ -24,42 +24,34 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from model import AstroMambaHInputs, research_config  # noqa: E402
-from synthetic import SyntheticConfig, SyntheticGenerator  # noqa: E402
+from model import research_config  # noqa: E402
+from synthetic import SyntheticConfig  # noqa: E402
 from training import (  # noqa: E402
     AstroMambaHTrainingAdapter,
     AstroMambaHTrainingBatch,
     BoundedTrainer,
     TrainingConfig,
+    iter_synthetic_training_batches,
     resolve_device,
     tiny_astromamba_config,
 )
 def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBatch:
     """Create one full-raster normalized bundle without writing an artifact."""
 
-    bundle = SyntheticGenerator(
-        SyntheticConfig(
-            seed=23,
-            visits=1,
-            local_steps=1,
-            raster_height=720,
-            raster_width=1280,
-            wavelength_nm=(450.0, 650.0, 1000.0),
+    return next(
+        iter_synthetic_training_batches(
+            SyntheticConfig(
+                seed=23,
+                visits=1,
+                local_steps=1,
+                raster_height=720,
+                raster_width=1280,
+                wavelength_nm=(450.0, 650.0, 1000.0),
+            ),
+            sample_count=1,
+            device=device,
         )
-    ).generate()
-    arrays = bundle.as_model_numpy("injected")
-    inputs = AstroMambaHInputs(
-        **{
-            name: torch.from_numpy(value).to(device)
-            for name, value in arrays.items()
-        }
     )
-    target = torch.tensor(
-        [[1.0 if bundle.labels is not None and bundle.labels.latent_positive else 0.0]],
-        dtype=torch.float32,
-        device=device,
-    )
-    return AstroMambaHTrainingBatch(inputs=inputs, target=target)
 
 
 def run(device_request: str = "auto", *, research: bool = False) -> dict[str, object]:

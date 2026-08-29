@@ -23,7 +23,7 @@ The repository-wide test command currently passes:
 
 ```text
 pytest -q
-37 passed
+38 passed
 ```
 
 The real AstroMamba-H CUDA smoke path uses a bounded one-batch, one-visit,
@@ -72,7 +72,7 @@ input:                  [1, 1, 1, 6, 720, 1280]
 AMP:                    bfloat16
 loss_is_finite:         true
 peak CUDA allocated:    approximately 1.53 GiB
-process RSS:            approximately 1.81 GiB
+process RSS:            approximately 1.88 GiB
 storage written:        0 bytes
 ```
 
@@ -94,7 +94,7 @@ resource violation:     rss
 storage written:        0 bytes
 ```
 
-The research synthetic-training smoke reached approximately 1.81 GiB process
+The research synthetic-training smoke reached approximately 1.88 GiB process
 RSS and is therefore also outside the requested host-RSS cap.
 
 The excess is present even before a substantial model is used: importing
