@@ -556,45 +556,64 @@ the measured time-varying signal must remain the evidence for the candidate.
 ## 10. Proposed model architecture
 
 ```text
-1280x720 patch encoder
-        ↓
-spatial feature map
-
-wavelength-token encoder
-        ↓
-hyperspectral representation
-
-exposure and observer-geometry encoder
-        ↓
-observation-state representation
-
-short-time event encoder
-        ↓
-local event representation
-
-long-time encoder
-        ↓
-long-baseline recurrence representation
-
-regional object encoder/graph
-        ↓
-foreground/background spatial context
-
-coverage and quality branch
-        ↓
-observation-quality representation
-
-cross-modal fusion
-        ↓
-representation decoder
-        ↓
-dense wavelength-dependent heatmaps
-        ↓
-candidate extraction and spatial tracking
-        ↓
-simple event classifier
-        ↓
-structured candidate/event output
+                         RAW OBSERVATION
+             1280x720 + uncertainty / masks
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │ MULTISCALE CNN      │
+                    │ ConvNeXt-V2 style   │
+                    │ approximately 27M   │
+                    └─────────┬───────────┘
+                              │
+             ┌────────────────┼────────────────┐
+             ▼                ▼                ▼
+           /8 map           /16 map           /32 map
+        160x90xC          80x45xC           40x23xC
+             │                │                │
+             └────────────────┼────────────────┘
+                              ▼
+                   SOURCE-AWARE TOKENIZER
+                deformable ROI / learned top-K
+                         approximately 3M
+                              │
+                    64-192 source/context tokens
+                         approximately 384-d
+                              │
+             ┌────────────────┼─────────────────┐
+             ▼                ▼                 ▼
+       wavelength        object/context     observer/geometry
+         encoder          set/graph encoder       MLP
+          ~4M                 ~5M                 ~1M
+             │                │                 │
+             └────────────┬───┴────────────┬────┘
+                          ▼                ▼
+                  CROSS-MODAL FUSION
+                       approximately 5-6M
+                          │
+                          ▼
+                    LOCAL MAMBA-2
+                       approximately 11-13M
+                          │
+                     EVENT TOKENS
+                          │
+                          ▼
+                    LONG-TIME MAMBA-2
+                       approximately 10-12M
+                          │
+             ┌────────────┴─────────────┐
+             ▼                          ▼
+       SPATIAL-TEMPORAL              GLOBAL HEADS
+          DECODER                       approximately 3M
+          approximately 9-10M             │
+             │                            ├─ candidate probability
+             ▼                            ├─ event probability
+      wavelength heatmaps                 ├─ transit time
+      source heatmaps                     ├─ depth and duration
+      uncertainty maps                    ├─ period posterior
+      segmentation                        ├─ parameter uncertainty
+                                            ├─ artifact probability
+                                            └─ OOD / quality
 ```
 
 The full 1280x720 patch remains the input. Internally, a multiscale spatial
@@ -609,6 +628,160 @@ also hiding the entire decision inside a second large neural network.
 The internal lensing representation can participate in shared encoding and
 auxiliary training losses, but the v0 classifier should primarily read the
 dense measurement-derived heatmaps, uncertainty, and validity masks.
+
+The target size for this ambitious architecture is approximately 82-86M
+parameters, with an allowed research range of roughly 78-90M. Capacity should
+go into source-aware spatial modeling, wavelength fusion, object-context
+reasoning, temporal hierarchy, and decoding rather than only making Mamba
+deeper.
+
+### AstroMamba-H components
+
+#### Spatial backbone: approximately 27M parameters
+
+The spatial backbone is a custom ConvNeXt-V2-style CNN. An initial target
+configuration is:
+
+| Stage | Resolution | Channels | Blocks |
+| --- | ---: | ---: | ---: |
+| Stem | 320x180 | 96 | - |
+| Stage 1 | 320x180 | 96 | 3 |
+| Stage 2 | 160x90 | 192 | 3 |
+| Stage 3 | 80x45 | 384 | 9 |
+| Stage 4 | 40x23 | 512 | 3 |
+
+It directly receives normalized physical-ratio flux, noise-scaled residual,
+uncertainty, validity mask, interpolation mask, and exposure/coverage maps.
+Large depthwise kernels, deformable convolution in the final spatial stages,
+anti-aliased downsampling, coordinate channels, PSF conditioning, and FPN
+lateral connections are architecture variants to evaluate.
+
+#### Source-aware tokenizer: approximately 3-3.5M parameters
+
+The CNN feature maps must not be globally averaged. An FPN source-proposal head
+will produce objectness/transientness maps, select approximately 64-128 top-K
+locations, and use deformable multi-scale ROI sampling to create approximately
+384-dimensional source tokens. Approximately 32-64 background/context tokens
+should be retained alongside the source tokens.
+
+#### Wavelength encoder: approximately 4M parameters
+
+The continuous wavelength encoder uses Fourier features over logarithmic
+wavelength or photon energy and accepts a variable number of wavelength bins.
+It produces approximately 256-dimensional wavelength tokens from normalized
+value, uncertainty, wavelength, bandwidth, exposure duration, response, and
+validity. Very dense spectra may first be locally compressed with a small 1D
+CNN or Mamba.
+
+#### Object/context encoder: approximately 4.5-5M parameters
+
+Regional objects are processed as a graph or set with a Graph Transformer or
+Set Transformer. This branch produces per-object embeddings, a regional
+context token, and foreground/background relationship features. It models
+source contamination, relative proper motion, mass/distance relationships,
+and possible lensing geometry.
+
+#### Observer/geometry encoder: approximately 1M parameters
+
+Observer position and velocity, pointing, angular scale, exposure duration,
+orientation, and coverage are encoded with a small MLP and feature-wise
+conditioning. Physical vectors and angle sine/cosine pairs are preferred over
+categorical observatory IDs.
+
+#### Cross-modal fusion: approximately 5-6M parameters
+
+Limited cross-attention is used where explicit association is needed:
+
+```text
+source token
+      ├── cross-attention to wavelength tokens
+      ├── cross-attention to object-context tokens
+      └── FiLM/conditioning from geometry, exposure, and coverage
+```
+
+The initial target is three to four cross-modal blocks. The design principle is
+CNN for space, attention for modality association, and Mamba for time.
+
+#### Local/event Mamba-2: approximately 11-13M parameters
+
+The first temporal stage operates on source tokens within each visit or
+continuous observing sequence. An initial target is width 512, approximately
+eight Mamba-2 blocks, and state size 64-128. It receives event-relative time,
+delta-t, exposure duration, start/mid/end times, barycentric timing, and
+validity/interpolation masks.
+
+It learns local transit shape, ingress, egress, asymmetry, stellar flares,
+pointing jitter, cosmic-ray behavior, short-timescale microlensing, and
+wavelength-dependent changes.
+
+#### Visit/event pooling
+
+Local sequences are compressed with learned attention pooling into a small set
+of event morphology, event photometry, event spectral, and quality tokens.
+Blind averaging is not sufficient because it can erase short events.
+
+#### Long-time Mamba-2: approximately 10-12M parameters
+
+The second temporal hierarchy operates over visit/event tokens spanning months
+or years with irregular cadence. An initial target is width 512 and seven to
+eight Mamba-2 blocks. It receives absolute observation time, delta-t,
+long-baseline duration, event confidence, coverage, wavelength availability,
+and observer geometry.
+
+It learns recurrence, approximate period, phase consistency, repeated dip
+morphology, long-term stellar variability, observation gaps, and
+cross-observatory consistency.
+
+#### Period-proposal branch: approximately 1.5-2M parameters
+
+A small auxiliary branch provides learned features analogous to
+autocorrelation, Lomb-Scargle-like periodic features, box-least-squares-like
+scores, and phase-folded summaries. These are proposal features, not final
+scientific truth. They give the long-time model an explicit periodicity bias
+without requiring it to rediscover every period-search method.
+
+#### Spatial-temporal decoder: approximately 9-10M parameters
+
+The decoder preserves FPN features and injects temporally enriched source
+representations back into the spatial pyramid through deformable scatter. It
+produces source, event, uncertainty, and wavelength-dependent maps.
+
+To avoid emitting hundreds of full-resolution maps, wavelength outputs may use
+a low-rank factorization:
+
+```text
+H[lambda, y, x] ≈ sum_k A[k, y, x] * B[k, lambda]
+```
+
+An initial rank of approximately 16-32 is a target for experimentation.
+
+#### Global heads: approximately 2.5-3M parameters
+
+Separate heads predict candidate/event classes, transit timing and shape,
+orbital posteriors, uncertainty, artifact probability, data sufficiency, and
+out-of-distribution status. The public v0 output is specified below; lensing
+features remain an internal auxiliary representation.
+
+### Parameter budget
+
+| Component | Approximate parameters |
+| --- | ---: |
+| ConvNeXt-V2-style spatial encoder | 27M |
+| FPN and source tokenizer | 3.5M |
+| Wavelength/spectral encoder | 4M |
+| Object graph/set encoder | 4.5-5M |
+| Geometry and coverage encoder | 1M |
+| Cross-modal fusion | 5-6M |
+| Local Mamba-2 | 11-13M |
+| Long-time Mamba-2 | 10-12M |
+| Period proposal network | 1.5-2M |
+| Spatial-temporal decoder | 9-10M |
+| Prediction heads | 2.5-3M |
+| **Total target** | **approximately 82-86M** |
+
+The implementation must avoid flattening every spatial position, time step, and
+wavelength into one sequence. The architecture factorizes the problem as
+space, wavelength, cross-modal association, short time, and long time.
 
 ### 10.1 Dense wavelength-dependent heatmaps
 
