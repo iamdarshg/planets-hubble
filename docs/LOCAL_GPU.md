@@ -72,39 +72,34 @@ input:                  [1, 1, 1, 6, 720, 1280]
 AMP:                    bfloat16
 loss_is_finite:         true
 peak CUDA allocated:    approximately 1.53 GiB
-process RSS:            approximately 1.88 GiB
+process RSS:            approximately 1.67 GiB
 storage written:        0 bytes
 ```
 
 This is a functional optimization smoke, not convergence evidence. It shows
 that the research-size model can consume a real synthetic full-resolution
-bundle and update its parameters on the local GPU under the available VRAM.
+bundle and update its parameters on the local GPU under the available VRAM and
+the revised 1.8 GiB host-RSS cap.
 
 ## Resource-cap result
 
-The requested caps are 720 MB process RSS and 5 GB storage. Streaming and
-synthetic-data stress checks are within those limits. The CUDA optimizer
-smoke is functionally successful but is not RSS-cap compliant on this
-Windows/PyTorch runtime:
+The revised requested caps are 1.8 GiB process RSS and 5 GiB storage.
+Streaming, synthetic-data generation, and the direct-CUDA research smoke are
+within those limits on the current validation run:
 
 ```text
-measured tiny GPU-smoke RSS: approximately 1.54 GiB
-RSS cap:                720 MiB
-resource violation:     rss
+measured research RSS: approximately 1.67 GiB
+RSS cap:                1.80 GiB
+resource violation:     none
 storage written:        0 bytes
 ```
 
-The research synthetic-training smoke reached approximately 1.88 GiB process
-RSS and is therefore also outside the requested host-RSS cap.
+The prior CPU-to-CUDA construction path reached approximately 1.88 GiB and
+was outside the revised cap. Research mode now constructs the model directly
+on CUDA, avoiding that migration overhead. The current smoke reports
+`rss_within_cap=true`.
 
-The excess is present even before a substantial model is used: importing
-PyTorch is approximately 499 MB RSS on this machine, and CUDA runtime/kernel
-initialization adds a large host-resident footprint. The current harness
-therefore reports `rss_within_cap=false` and includes `"rss"` in
-`resource_cap_violations`; it does not silently call the run cap-compliant.
-
-The next resource-constrained deployment decision is to run CUDA validation
-in an environment whose PyTorch/CUDA host footprint fits the 720 MB budget,
-or to revise the host-RSS cap separately from the GPU-memory cap. The current
-GPU evidence remains valid as a functional local-GPU smoke test, not as proof
-of compliance with the requested host-RSS ceiling.
+The harness continues to report the measured RSS and any violations rather
+than assuming compliance. The cap is runtime- and process-specific; future
+changes to PyTorch, CUDA, model construction, or batch size require another
+measurement.

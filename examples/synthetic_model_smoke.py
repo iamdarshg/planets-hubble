@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -58,7 +59,11 @@ def run(device_request: str = "auto", *, research: bool = False) -> dict[str, ob
     device = resolve_device(device_request)
     config = research_config() if research else tiny_astromamba_config()
     batch = make_synthetic_training_batch(device)
-    model = AstroMambaHTrainingAdapter(config=config)
+    construction_context = (
+        torch.device(device) if research and device.type == "cuda" else nullcontext()
+    )
+    with construction_context:
+        model = AstroMambaHTrainingAdapter(config=config)
     trainer = BoundedTrainer(
         model,
         config=TrainingConfig(device=device, max_batches_per_epoch=1, amp="auto"),

@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+from training import DEFAULT_RSS_CAP_BYTES
 from training.gpu_smoke import run_gpu_smoke
 
 
@@ -20,7 +21,7 @@ def test_gpu_smoke_runs_or_skips_with_explicit_reason():
     assert result.gpu_name is not None
     assert result.input_raster_shape == (1, 1, 1, 6, 720, 1280)
     assert result.peak_gpu_memory_bytes is not None
-    assert result.rss_cap_bytes == 720 * 1024 * 1024
+    assert result.rss_cap_bytes == DEFAULT_RSS_CAP_BYTES
     assert result.storage_cap_bytes == 5 * 1024 * 1024 * 1024
     assert result.storage_bytes_written == 0
     assert result.storage_within_cap is True

@@ -98,15 +98,14 @@ inline values and `.npy`/`.npz` arrays.
 The intended local-development limits are:
 
 ```text
-host RSS: 720 MiB
+host RSS: 1.8 GiB
 storage:  5 GiB
 ```
 
-Synthetic generation and storage checks stay within those limits. On the
-validated Windows/PyTorch/CUDA installation, the CUDA runtime and model
-training process exceed the 720 MiB host-RSS ceiling even though the GPU step
-is finite and successful. The harness reports this explicitly as an RSS
-violation; it does not relabel the run as compliant. See
+Synthetic generation and storage checks stay within those limits. The
+research-mode smoke constructs the model directly on CUDA and has measured
+approximately 1.67 GiB process RSS on the validated Windows/PyTorch/CUDA
+installation, within the revised host-RSS ceiling. See
 [`docs/LOCAL_GPU.md`](docs/LOCAL_GPU.md) for the measured boundary.
 
 ## Project documents

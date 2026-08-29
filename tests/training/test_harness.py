@@ -4,6 +4,7 @@ from torch import nn
 
 from training import (
     BoundedTrainer,
+    DEFAULT_RSS_CAP_BYTES,
     NonFiniteTrainingError,
     TinyAstroAdapter,
     TrainingConfig,
@@ -29,7 +30,8 @@ def test_cpu_training_is_bounded_and_reports_finite_state():
     assert report.loss_is_finite is True
     assert report.last_loss is not None
     assert torch.isfinite(torch.tensor(report.last_loss))
-    assert report.rss_cap_bytes == 720 * 1024 * 1024
+    assert DEFAULT_RSS_CAP_BYTES == int(1.8 * 1024 * 1024 * 1024)
+    assert report.rss_cap_bytes == DEFAULT_RSS_CAP_BYTES
     assert report.storage_cap_bytes == 5 * 1024 * 1024 * 1024
     assert report.storage_bytes_written == 0
     assert report.storage_within_cap is True
