@@ -370,7 +370,180 @@ quality and active-learning branches. It must not become a shortcut for the
 planet label. The system should report performance separately for high- and
 low-coverage regions and should support coverage dropout during training.
 
-## 9. Proposed model architecture
+## 9. Regional object context and gravitational lensing
+
+Every patch embedding will include a representation of the other astronomical
+objects present within or near the patch. This context is important both for
+source deblending and for a future gravitational-lensing branch.
+
+### 9.1 Object tokens
+
+Objects may come from a catalog, a coadd/source-detection pipeline, or the
+model's own spatial detector. The object context should not depend on object
+names as primary identifiers. Each object is represented by physical and
+spatial features:
+
+```text
+object_token = {
+    relative_tangent_plane_x,
+    relative_tangent_plane_y,
+    angular_separation,
+    angular_extent,
+    shape_or_morphology,
+    multi-band_normalized_brightness,
+    wavelength_coverage,
+    parallax_or_distance_prior,
+    proper_motion,
+    radial_velocity, when available,
+    mass_or_lens_mass_prior, when available,
+    redshift, when available,
+    astrometric_uncertainty,
+    source_detection_confidence
+}
+```
+
+The object list should include more than known exoplanet hosts. It should also
+include likely foreground stars, background stars, galaxies, galaxy clusters,
+compact objects, and nearby sources that may contaminate a light curve.
+
+The phrase "larger objects" should be interpreted primarily as objects with
+greater mass or a stronger lensing geometry. Apparent angular size alone is not
+a reliable proxy for lensing strength. A compact foreground star can be a more
+relevant lens than a large-looking diffuse source.
+
+### 9.2 Object-context fusion
+
+The object tokens should be processed by a spatial set encoder or object graph
+encoder and fused into every relevant frame/event representation:
+
+```text
+regional object tokens
+        ↓
+spatial set/graph encoder
+        ↓
+regional context embedding
+        ↓
+cross-attention with image, spectral, and temporal tokens
+```
+
+The context embedding should be available at three levels:
+
+```text
+patch level:
+    all objects and their geometry in the 1280x720 region
+
+source level:
+    neighboring objects around a candidate source
+
+frame level:
+    objects present, missing, or changing in that observation
+```
+
+The object context should be recomputed or quality-checked after WCS
+reprojection. A catalog entry is not automatically a valid source in every
+frame, and catalog incompleteness must be represented explicitly.
+
+### 9.3 Lensing geometry
+
+The lensing branch should model the relationship between:
+
+```text
+foreground lens object
+background source object
+observer
+relative proper motion
+mass and distance priors
+time-dependent angular alignment
+```
+
+Useful derived features include:
+
+```text
+lens-source angular separation
+lens-source relative proper motion
+observer-source-lens geometry
+estimated Einstein angular scale
+normalized impact parameter
+estimated Einstein crossing time
+```
+
+The model should receive the physical inputs needed to estimate these values,
+but should also be able to work when mass or distance is uncertain. The output
+must expose those uncertainties rather than silently filling missing values.
+
+### 9.4 Two lensing regimes
+
+The system should distinguish two related but different tasks.
+
+Strong or macrolensing by a massive foreground object or structure may produce
+arcs, multiple images, or extended distortions. This is primarily a spatial
+image/context problem.
+
+Microlensing by a foreground star is primarily a time-dependent brightness
+problem. A planet orbiting the foreground lens can produce a shorter, smaller
+perturbation in the stellar microlensing light curve. NASA describes this
+planetary perturbation as a short additional signal whose timing and amplitude
+can constrain the planetary system. [NASA: Hubble's Gravitational Lenses](https://science.nasa.gov/mission/hubble/science/universe-uncovered/hubbles-gravitational-lenses/),
+[NASA: How We Find and Characterize Exoplanets](https://science.nasa.gov/exoplanets/how-we-find-and-characterize/)
+
+The model should therefore have separate hypotheses for:
+
+```text
+ordinary stellar microlensing
+planetary microlensing perturbation
+transit or eclipse
+stellar variability
+instrumental or reduction artifact
+```
+
+The planetary-lensing branch must not assume that the foreground lens is the
+same star as the background source. This foreground/background distinction is
+central to the physics.
+
+### 9.5 Microlensing outputs
+
+For a possible planetary microlensing event, the model may estimate:
+
+```text
+microlensing_probability
+planetary_perturbation_probability
+foreground_lens candidate position
+background_source candidate position
+event midpoint posterior
+Einstein timescale posterior
+impact parameter posterior
+mass-ratio posterior
+projected separation posterior
+relative proper-motion posterior
+astrometric-separation or centroid-shift prediction
+```
+
+These are not the same as the transit-orbit outputs. Microlensing commonly
+constrains a planet's mass ratio and projected separation during a transient
+event, not a complete orbital period and three-dimensional orbit. A full orbit
+should be reported only when additional observations constrain it.
+
+### 9.6 Object-context safeguards
+
+Object catalogs and coverage maps can create severe label shortcuts. The model
+must not conclude that a patch contains a planet merely because it contains a
+known massive star, a cataloged exoplanet host, or a dense object catalog.
+
+Required safeguards include:
+
+```text
+catalog-object dropout
+object-position perturbation tests
+blind tests with target names and planet identifiers removed
+separate evaluation on catalog-complete and catalog-incomplete regions
+foreground/background role swaps in negative examples
+synthetic lensing injections with non-lensing object fields
+```
+
+Object context should improve physical interpretation and source association;
+the measured time-varying signal must remain the evidence for the candidate.
+
+## 10. Proposed model architecture
 
 ```text
 1280x720 patch encoder
@@ -392,6 +565,10 @@ local event representation
 long-time encoder
         ↓
 long-baseline recurrence representation
+
+regional object encoder/graph
+        ↓
+foreground/background spatial context
 
 coverage and quality branch
         ↓
@@ -486,7 +663,49 @@ unconstrained
 An orbital-period estimate from one isolated transit must not be presented as
 an observation-derived measurement.
 
-### 10.5 Wavelength-dependent output
+### 10.5 Gravitational-lensing output
+
+The model should expose lensing as a separate hypothesis rather than folding
+it into the ordinary transit probability.
+
+For a possible stellar microlensing event:
+
+```text
+microlensing probability
+planetary microlensing perturbation probability
+foreground lens candidate position
+background source candidate position
+event midpoint posterior
+Einstein timescale posterior
+impact parameter posterior
+mass-ratio posterior
+projected separation posterior
+relative proper-motion posterior
+astrometric separation or centroid-shift prediction
+```
+
+The lensing output should include the proposed foreground/background roles and
+their uncertainties. A planetary-lensing event may constrain a mass ratio and
+projected separation without determining a complete orbital period or
+three-dimensional orbit.
+
+For strong or macrolensing candidates, the output may instead include:
+
+```text
+strong-lensing probability
+number of image/arcs hypotheses
+lens-structure candidate position
+source-structure candidate position
+predicted image geometry
+predicted time-delay representation, when measurable
+```
+
+The initial exoplanet search should prioritize planetary microlensing
+perturbations. Strong-lensing outputs are a related future branch and should
+not be interpreted as exoplanet detections without a planetary perturbation in
+the time-domain data.
+
+### 10.6 Wavelength-dependent output
 
 For multimodal spectral data, the output may include:
 
@@ -500,7 +719,7 @@ atmospheric-feature probabilities, in a later phase
 The first version should focus on reconstructing wavelength-dependent transit
 depth and uncertainty before attempting specific molecule classification.
 
-### 10.6 Quality and uncertainty output
+### 10.7 Quality and uncertainty output
 
 Every candidate record should include:
 
@@ -522,7 +741,7 @@ signal dominated by systematics
 out-of-distribution observation
 ```
 
-### 10.7 Candidate record sketch
+### 10.8 Candidate record sketch
 
 ```json
 {
@@ -546,6 +765,16 @@ out-of-distribution observation
     "period": {"median": null, "lower": null, "upper": null},
     "inclination": {"median": null, "lower": null, "upper": null},
     "impact_parameter": {"median": null, "lower": null, "upper": null},
+    "constraint_status": "unconstrained"
+  },
+  "lensing": {
+    "microlensing_probability": 0.0,
+    "planetary_perturbation_probability": 0.0,
+    "foreground_lens": {"x": null, "y": null, "confidence": 0.0},
+    "background_source": {"x": null, "y": null, "confidence": 0.0},
+    "einstein_timescale": {"median": null, "lower": null, "upper": null},
+    "mass_ratio": {"median": null, "lower": null, "upper": null},
+    "projected_separation": {"median": null, "lower": null, "upper": null},
     "constraint_status": "unconstrained"
   },
   "spectral": {
@@ -574,12 +803,16 @@ known or predicted event windows
 published orbital parameter priors
 uncertainties and reference provenance
 synthetic transit injections
+synthetic stellar and planetary microlensing injections
+foreground/background object-role labels where available
 real non-host stars and artifact examples
 ```
 
-Synthetic transits should be integrated over the actual exposure duration and
-injected into real noise/systematics. The training set should include shifted
-event windows and missing-wavelength cases.
+Synthetic transits and microlensing events should be integrated over the actual
+exposure duration and injected into real noise/systematics. The training set
+should include shifted event windows, missing-wavelength cases, incomplete
+object catalogs, and negative fields containing massive objects but no lensing
+signal.
 
 Splits must be made by host system or source, not by randomly splitting frames
 from the same star across train and validation sets.
@@ -594,10 +827,13 @@ model training. It should:
 3. Expand selected product groups.
 4. Inspect FITS headers and verify timestamps, exposure durations, WCS,
    wavelength information, uncertainty, and data-quality fields.
-5. Produce a small normalized sample with long-time, short-time, wavelength,
-   geometry, exposure, and coverage tensors.
-6. Validate that missing modalities and interpolation masks survive the whole
-   preprocessing path.
+5. Build or retrieve a regional object list and validate object positions,
+   separations, uncertainties, and available distance/proper-motion/mass
+   information.
+6. Produce a small normalized sample with long-time, short-time, wavelength,
+   geometry, exposure, object-context, and coverage tensors.
+7. Validate that missing modalities, interpolation masks, and incomplete object
+   catalogs survive the whole preprocessing path.
 
 The first model experiment should use a small target set with known HST
 observations, synthetic injections, and a clearly documented train/validation
@@ -615,5 +851,11 @@ split.
   cross-observatory use?
 - What minimum number and spacing of events is required before an orbital
   period is reported as data-constrained?
+- Which object catalog or source-detection system provides sufficiently reliable
+  positions, proper motions, distances, and mass priors for the lensing branch?
+- How should foreground/background object roles be initialized when the catalog
+  has no distance ordering?
+- Which microlensing events have enough cadence and multi-observatory coverage
+  for a meaningful planetary-perturbation training set?
 - Should the first output be a source heatmap, coordinate-query records, or
   both in a shared model?
