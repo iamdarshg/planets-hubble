@@ -7,6 +7,7 @@ one process; it does not claim scientific convergence.
 Run from the repository root with::
 
     python examples/synthetic_model_smoke.py --device cuda
+    python examples/synthetic_model_smoke.py --device cuda --research
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from model import AstroMambaHInputs  # noqa: E402
+from model import AstroMambaHInputs, research_config  # noqa: E402
 from synthetic import SyntheticConfig, SyntheticGenerator  # noqa: E402
 from training import (  # noqa: E402
     AstroMambaHTrainingAdapter,
@@ -33,8 +34,6 @@ from training import (  # noqa: E402
     resolve_device,
     tiny_astromamba_config,
 )
-
-
 def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBatch:
     """Create one full-raster normalized bundle without writing an artifact."""
 
@@ -63,9 +62,9 @@ def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBa
     return AstroMambaHTrainingBatch(inputs=inputs, target=target)
 
 
-def run(device_request: str = "auto") -> dict[str, object]:
+def run(device_request: str = "auto", *, research: bool = False) -> dict[str, object]:
     device = resolve_device(device_request)
-    config = tiny_astromamba_config()
+    config = research_config() if research else tiny_astromamba_config()
     batch = make_synthetic_training_batch(device)
     model = AstroMambaHTrainingAdapter(config=config)
     trainer = BoundedTrainer(
@@ -77,6 +76,7 @@ def run(device_request: str = "auto") -> dict[str, object]:
         "device": report.device,
         "model_name": model.model_name,
         "parameter_count": report.parameter_count,
+        "configuration": "research" if research else "tiny",
         "input_raster_shape": list(batch.inputs.raster.shape),
         "batches_seen": report.batches_seen,
         "loss_is_finite": report.loss_is_finite,
@@ -91,8 +91,13 @@ def run(device_request: str = "auto") -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--research",
+        action="store_true",
+        help="run the measured 84M-parameter research configuration",
+    )
     args = parser.parse_args()
-    print(json.dumps(run(args.device), sort_keys=True))
+    print(json.dumps(run(args.device, research=args.research), sort_keys=True))
     return 0
 
 

@@ -23,7 +23,7 @@ The repository-wide test command currently passes:
 
 ```text
 pytest -q
-30 passed
+37 passed
 ```
 
 The real AstroMamba-H CUDA smoke path uses a bounded one-batch, one-visit,
@@ -60,6 +60,26 @@ peak CUDA reserved:     approximately 610.00 MiB
 This is inference evidence only. It does not establish that the 84M model
 fits a multi-batch training run or that it has learned exoplanet detection.
 
+The research preset has now also completed a one-batch synthetic training
+smoke. This uses the same full raster contract as the model, performs forward,
+finite-loss validation, backward, and an AdamW optimizer step:
+
+```text
+command:                python examples/synthetic_model_smoke.py --device cuda --research
+configuration:          research
+parameters:             84,004,564
+input:                  [1, 1, 1, 6, 720, 1280]
+AMP:                    bfloat16
+loss_is_finite:         true
+peak CUDA allocated:    approximately 1.53 GiB
+process RSS:            approximately 1.81 GiB
+storage written:        0 bytes
+```
+
+This is a functional optimization smoke, not convergence evidence. It shows
+that the research-size model can consume a real synthetic full-resolution
+bundle and update its parameters on the local GPU under the available VRAM.
+
 ## Resource-cap result
 
 The requested caps are 720 MB process RSS and 5 GB storage. Streaming and
@@ -68,11 +88,14 @@ smoke is functionally successful but is not RSS-cap compliant on this
 Windows/PyTorch runtime:
 
 ```text
-measured GPU-smoke RSS:  approximately 1.76 GiB
+measured tiny GPU-smoke RSS: approximately 1.54 GiB
 RSS cap:                720 MiB
 resource violation:     rss
 storage written:        0 bytes
 ```
+
+The research synthetic-training smoke reached approximately 1.81 GiB process
+RSS and is therefore also outside the requested host-RSS cap.
 
 The excess is present even before a substantial model is used: importing
 PyTorch is approximately 499 MB RSS on this machine, and CUDA runtime/kernel
