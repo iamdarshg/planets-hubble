@@ -500,9 +500,15 @@ The planetary-lensing branch must not assume that the foreground lens is the
 same star as the background source. This foreground/background distinction is
 central to the physics.
 
-### 9.5 Microlensing outputs
+### 9.5 Internal microlensing representation
 
-For a possible planetary microlensing event, the model may estimate:
+Microlensing is an internal representation and auxiliary training objective in
+the first public output design. It should help the shared encoder understand
+foreground/background relationships, mass-dependent perturbations, and
+time-dependent alignment without forcing every normal candidate result to
+expose a lensing classification.
+
+The internal lensing branch may estimate:
 
 ```text
 microlensing_probability
@@ -522,6 +528,10 @@ These are not the same as the transit-orbit outputs. Microlensing commonly
 constrains a planet's mass ratio and projected separation during a transient
 event, not a complete orbital period and three-dimensional orbit. A full orbit
 should be reported only when additional observations constrain it.
+
+The primary v0 result should expose only the shared candidate/event outputs.
+Internal lensing states may be retained as diagnostic tensors or auxiliary
+losses for research, but they are not required in the public candidate schema.
 
 ### 9.6 Object-context safeguards
 
@@ -576,19 +586,115 @@ observation-quality representation
 
 cross-modal fusion
         ↓
-prediction heads
+representation decoder
+        ↓
+dense wavelength-dependent heatmaps
+        ↓
+candidate extraction and spatial tracking
+        ↓
+simple event classifier
+        ↓
+structured candidate/event output
 ```
 
 The full 1280x720 patch remains the input. Internally, a multiscale spatial
 encoder may first detect sources at coarse resolution and then extract
 high-resolution features around candidate sources.
 
+The representation decoder is the primary learned output stage. The event
+classifier is intentionally simple in the first system so that we can measure
+whether the learned heatmaps contain useful astrophysical information without
+also hiding the entire decision inside a second large neural network.
+
+The internal lensing representation can participate in shared encoding and
+auxiliary training losses, but the v0 classifier should primarily read the
+dense measurement-derived heatmaps, uncertainty, and validity masks.
+
+### 10.1 Dense wavelength-dependent heatmaps
+
+For every long-time observation and every available short-time step, the
+representation decoder should emit a spatial heatmap for each canonical
+wavelength/energy bin:
+
+```text
+H[long_time, short_time, wavelength_bin, y, x, feature]
+```
+
+The dense feature channels should include at least:
+
+```text
+normalized signal or residual
+transit-compatible signal score
+source presence score
+uncertainty
+validity mask
+interpolation mask
+```
+
+The internal wavelength encoder remains variable-length and wavelength-aware.
+For dense storage and for the simple classifier, its output is decoded onto a
+canonical logarithmic wavelength/energy grid. Each grid bin must carry an
+availability and effective-response mask so an empty bin is not confused with
+a measured zero signal.
+
+Native variable-length wavelength tokens should remain available for training
+and diagnostic use. Canonical heatmaps are a stable interchange representation,
+not a claim that every observatory measured every bin at the same resolution.
+
+The heatmap output should be written as chunked arrays, such as Zarr, and
+referenced from the structured JSON result rather than embedded directly in
+JSON.
+
+### 10.2 Candidate extraction and simple event classification
+
+The classifier pipeline should be:
+
+```text
+dense heatmaps
+        ↓
+spatial peaks/source proposals
+        ↓
+WCS-aware spatial association across observations
+        ↓
+per-source long/short/wavelength tracks
+        ↓
+simple event classifier
+```
+
+The first classifier should be a transparent baseline such as logistic
+regression, a calibrated tree ensemble, or a small generalized additive model.
+It should consume extracted features from the heatmaps rather than raw target
+names or catalog identifiers.
+
+Candidate-track features may include:
+
+```text
+signal depth and residual statistics by wavelength
+short-time shape features
+long-time recurrence features
+number and spacing of possible events
+uncertainty-weighted signal-to-noise
+valid and interpolated sample counts
+source isolation and neighboring-object context
+coverage features
+```
+
+This separation gives us two independently inspectable artifacts:
+
+```text
+representation quality:
+    do the heatmaps preserve source, wavelength, and time-dependent signals?
+
+event-classifier quality:
+    can a simple model distinguish transit-like events from artifacts?
+```
+
 ## 10. Proposed model output
 
 The output should be a structured set of candidate records rather than one
 single classification label.
 
-### 10.1 Candidate localization
+### 10.3 Candidate localization
 
 For the uncentered patch:
 
@@ -602,7 +708,7 @@ candidate confidence
 Each candidate should include both pixel coordinates and celestial coordinates
 obtained through the patch WCS.
 
-### 10.2 Event detection
+### 10.4 Event detection
 
 For each candidate source:
 
@@ -611,6 +717,7 @@ event_probability
 event_midpoint posterior
 event_start posterior
 event_end posterior
+event_duration posterior
 transit/eclipse classification
 event evidence score
 ```
@@ -618,7 +725,19 @@ event evidence score
 The event score should be based on measured data and should be reported
 separately from catalog priors and coverage quality.
 
-### 10.3 Transit-shape parameters
+Transit time is a required output, not an optional annotation. The result must
+include an event-time posterior in a declared time system, preferably with
+midpoint, start, end, and duration. A time-localization heatmap may also be
+stored:
+
+```text
+event_time_heatmap[long_time, short_time, y, x]
+```
+
+The model should be able to report multiple candidate event windows for one
+source when the observations are ambiguous.
+
+### 10.5 Transit-shape parameters
 
 When the short-time data support them:
 
@@ -634,7 +753,7 @@ impact parameter
 These should be posterior distributions or calibrated intervals, not only
 point estimates.
 
-### 10.4 Orbital parameters
+### 10.6 Orbital parameters
 
 The orbital head may estimate:
 
@@ -663,12 +782,13 @@ unconstrained
 An orbital-period estimate from one isolated transit must not be presented as
 an observation-derived measurement.
 
-### 10.5 Gravitational-lensing output
+### 10.7 Internal gravitational-lensing state
 
-The model should expose lensing as a separate hypothesis rather than folding
-it into the ordinary transit probability.
+Lensing should remain an internal representation and auxiliary objective in the
+first public output schema. It should not be folded into the ordinary transit
+probability or required in every candidate record.
 
-For a possible stellar microlensing event:
+For diagnostics or later research releases, the internal branch may retain:
 
 ```text
 microlensing probability
@@ -684,12 +804,12 @@ relative proper-motion posterior
 astrometric separation or centroid-shift prediction
 ```
 
-The lensing output should include the proposed foreground/background roles and
-their uncertainties. A planetary-lensing event may constrain a mass ratio and
-projected separation without determining a complete orbital period or
+The internal lensing state should include proposed foreground/background roles
+and their uncertainties. A planetary-lensing event may constrain a mass ratio
+and projected separation without determining a complete orbital period or
 three-dimensional orbit.
 
-For strong or macrolensing candidates, the output may instead include:
+For strong or macrolensing diagnostics, the internal branch may instead include:
 
 ```text
 strong-lensing probability
@@ -701,11 +821,11 @@ predicted time-delay representation, when measurable
 ```
 
 The initial exoplanet search should prioritize planetary microlensing
-perturbations. Strong-lensing outputs are a related future branch and should
-not be interpreted as exoplanet detections without a planetary perturbation in
-the time-domain data.
+perturbations as an auxiliary representation. Strong-lensing states are a
+related future branch and should not be interpreted as exoplanet detections
+without a planetary perturbation in the time-domain data.
 
-### 10.6 Wavelength-dependent output
+### 10.8 Wavelength-dependent output
 
 For multimodal spectral data, the output may include:
 
@@ -719,7 +839,7 @@ atmospheric-feature probabilities, in a later phase
 The first version should focus on reconstructing wavelength-dependent transit
 depth and uncertainty before attempting specific molecule classification.
 
-### 10.7 Quality and uncertainty output
+### 10.9 Quality and uncertainty output
 
 Every candidate record should include:
 
@@ -741,7 +861,7 @@ signal dominated by systematics
 out-of-distribution observation
 ```
 
-### 10.8 Candidate record sketch
+### 10.10 Candidate record sketch
 
 ```json
 {
@@ -757,24 +877,17 @@ out-of-distribution observation
     "artifact_probability": 0.0
   },
   "event": {
-    "midpoint": {"median": 0.0, "lower": 0.0, "upper": 0.0},
-    "duration": {"median": 0.0, "lower": 0.0, "upper": 0.0},
+    "time_system": "BJD_TDB",
+    "midpoint": {"median": null, "lower": null, "upper": null},
+    "start": {"median": null, "lower": null, "upper": null},
+    "end": {"median": null, "lower": null, "upper": null},
+    "duration_seconds": {"median": null, "lower": null, "upper": null},
     "depth": {"median": 0.0, "lower": 0.0, "upper": 0.0}
   },
   "orbit": {
     "period": {"median": null, "lower": null, "upper": null},
     "inclination": {"median": null, "lower": null, "upper": null},
     "impact_parameter": {"median": null, "lower": null, "upper": null},
-    "constraint_status": "unconstrained"
-  },
-  "lensing": {
-    "microlensing_probability": 0.0,
-    "planetary_perturbation_probability": 0.0,
-    "foreground_lens": {"x": null, "y": null, "confidence": 0.0},
-    "background_source": {"x": null, "y": null, "confidence": 0.0},
-    "einstein_timescale": {"median": null, "lower": null, "upper": null},
-    "mass_ratio": {"median": null, "lower": null, "upper": null},
-    "projected_separation": {"median": null, "lower": null, "upper": null},
     "constraint_status": "unconstrained"
   },
   "spectral": {
