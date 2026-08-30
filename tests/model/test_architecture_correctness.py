@@ -17,6 +17,7 @@ def tiny_config() -> AstroMambaHConfig:
         wavelength_fourier_features=2,
         period_bin_count=7,
         heatmap_rank=3,
+        decode_heatmaps=False,
     )
 
 

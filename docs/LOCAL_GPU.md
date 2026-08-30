@@ -19,16 +19,18 @@ GPU memory:     8188 MiB
 
 ## Verified paths
 
-The latest repository-wide test command passed:
+The latest repository-wide test command passed after making the full-raster
+architecture test use its no-decoder configuration (the test checks spatial
+gradient reachability, not decoder output):
 
 ```text
 python -m pytest -q
-66 passed in 16.41s
+67 passed in 11.07s
 ```
 
 ```text
 pytest -q
-66 passed in 16.41s
+67 passed in 11.07s
 ```
 
 The real AstroMamba-H CUDA smoke path uses a bounded one-batch, one-visit,
@@ -145,3 +147,43 @@ The harness continues to report the measured RSS and any violations rather
 than assuming compliance. The cap is runtime- and process-specific; future
 changes to PyTorch, CUDA, model construction, or batch size require another
 measurement.
+
+## Full-parent sequence fallback and counterfactual integrity
+
+Flattening all four full-resolution parent exposures through the research
+model at once exceeded the host cap on this Windows/CUDA build:
+
+```text
+full parent sequence, dense decoder:   1,971,089,408 bytes RSS (over cap)
+full parent sequence, summary fallback: 1,878,683,648 bytes RSS (within cap)
+summary fallback peak CUDA:            1,462,091,776 bytes
+```
+
+The `--sequence-summary` path therefore consumes every parent exposure, but
+reduces the raster cadence to one spatial summary before the model. It is a
+resource-bounded fallback, not equivalent to the intended local-time plus
+long-baseline Mamba sequence. The full temporal path remains a required future
+optimization before making orbital claims.
+
+Real-parent labels now force a `planet_transit` for even sample indices and a
+null counterfactual for odd indices. The injector no longer clips calibrated
+negative FLT/FLC background pixels to zero; its injected-minus-null delta is
+non-positive and localized to the source PSF. Prepared parents map the target
+RA/Dec through the SCI WCS into the crop and record `source_x`, `source_y`, and
+the mapping method in the manifest. Missing WCS falls back to the crop center
+with an explicit provenance warning.
+
+Because two full-resolution counterfactual batches do not fit simultaneously
+under the host cap, `finetune_real_isolated.py --paired` launches synchronized
+positive and null workers from the same checkpoint and averages their model
+updates on CPU. This approximates one paired optimizer step without a label
+ordering bias while keeping each GPU worker below the cap. The six-step HD
+209458 diagnostic run measured worker RSS between 1,885,118,464 and
+1,891,532,800 bytes and peak CUDA allocation of 1,561,726,464 bytes. It did
+not produce meaningful holdout separation: the corrected FP32 probabilities
+were `0.700895` for the injected view and `0.700075` for the null view, or
+0.50 accuracy at the 0.5 threshold.
+
+The current evidence is therefore an executable, cap-compliant data/model
+path and a corrected counterfactual generator—not evidence of a detected
+exoplanet, convergence, grokking, or accurate orbital parameters.

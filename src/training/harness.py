@@ -373,8 +373,17 @@ class BoundedTrainer:
         batches: Iterable[Any],
         *,
         loss_fn: LossFunction = default_loss_fn,
+        accumulation_steps: int = 1,
     ) -> EpochReport:
-        """Train on at most ``max_batches_per_epoch`` batches."""
+        """Train on at most ``max_batches_per_epoch`` batches.
+
+        ``accumulation_steps`` permits a counterfactual pair to share one
+        optimizer update without placing both full-resolution rasters in
+        memory at once.  The default remains one update per batch.
+        """
+
+        if not isinstance(accumulation_steps, int) or accumulation_steps < 1:
+            raise ValueError("accumulation_steps must be a positive integer")
 
         self.model.train()
         epoch_batches = 0
@@ -388,7 +397,8 @@ class BoundedTrainer:
                 break
             moved_batch = _move_to_device(batch, self.device)
             batch_count = _batch_size(moved_batch)
-            self.optimizer.zero_grad(set_to_none=True)
+            if epoch_batches % accumulation_steps == 0:
+                self.optimizer.zero_grad(set_to_none=True)
             with self._autocast():
                 prediction = self.model(moved_batch)
                 loss = loss_fn(prediction, moved_batch)
@@ -398,24 +408,27 @@ class BoundedTrainer:
                 self.state.loss_is_finite = False
                 raise NonFiniteTrainingError("loss is not finite")
 
+            loss_value = float(loss.detach().cpu())
+            scaled_loss = loss / accumulation_steps
             if self.scaler is not None:
-                self.scaler.scale(loss).backward()
+                self.scaler.scale(scaled_loss).backward()
                 self.scaler.unscale_(self.optimizer)
             else:
-                loss.backward()
+                scaled_loss.backward()
             if not _finite_gradients(self.model):
                 raise NonFiniteTrainingError("gradient is not finite")
-            if self.config.grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.config.grad_clip_norm
-                )
-            if self.scaler is not None:
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                self.optimizer.step()
-
-            loss_value = float(loss.detach().cpu())
+            should_step = (epoch_batches + 1) % accumulation_steps == 0
+            if should_step:
+                if self.config.grad_clip_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.config.grad_clip_norm
+                    )
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+                self.state.optimizer_steps += 1
 
             # The model returns a rich dictionary containing full-resolution
             # heatmaps and temporal diagnostics.  Release that graph and the
@@ -429,9 +442,20 @@ class BoundedTrainer:
             self.state.global_step += 1
             self.state.batches_seen += 1
             self.state.samples_seen += batch_count
-            self.state.optimizer_steps += 1
             self.state.last_loss = loss_value
             self.state.loss_is_finite = True
+
+        if epoch_batches and epoch_batches % accumulation_steps:
+            if self.config.grad_clip_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+            self.state.optimizer_steps += 1
 
         self.state.epoch += 1
         if self.device.type == "cuda":

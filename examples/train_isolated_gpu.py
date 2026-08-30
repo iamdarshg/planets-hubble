@@ -13,6 +13,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=16, help="counterfactual pairs")
     parser.add_argument("--start-seed", type=int, default=23)
+    parser.add_argument(
+        "--fixed-seed",
+        action="store_true",
+        help="repeat the same counterfactual pair for an overfit learnability probe",
+    )
     parser.add_argument("--checkpoint", type=Path, default=Path("artifacts/training/synthetic.pt"))
     parser.add_argument("--learning-rate", type=float, default=1e-2)
     parser.add_argument("--event-only", action="store_true")
@@ -27,6 +32,7 @@ def main() -> int:
     worker = Path(__file__).with_name("isolated_gpu_step.py")
     for pair_index in range(args.steps):
         for view in (0, 1):
+            seed = args.start_seed if args.fixed_seed else args.start_seed + pair_index
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -34,7 +40,7 @@ def main() -> int:
                     "--checkpoint",
                     str(args.checkpoint),
                     "--seed",
-                    str(args.start_seed + pair_index),
+                    str(seed),
                     "--view",
                     str(view),
                     "--learning-rate",

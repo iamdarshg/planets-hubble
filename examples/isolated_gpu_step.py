@@ -10,9 +10,11 @@ only BF16 model weights and is overwritten atomically by the caller.
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -46,11 +48,26 @@ def main() -> int:
     parser.add_argument("--view", type=int, choices=(0, 1), required=True)
     parser.add_argument("--phase", choices=("synthetic", "real"), default="synthetic")
     parser.add_argument("--manifest", type=Path, default=None)
-    parser.add_argument("--exposure-index", type=int, default=0)
+    parser.add_argument(
+        "--exposure-index",
+        type=int,
+        default=None,
+        help="optional single-exposure diagnostic; default loads the full parent sequence",
+    )
     parser.add_argument("--target-loss", type=float, default=0.5)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--event-only", action="store_true")
     parser.add_argument("--source-event-curriculum", action="store_true")
+    parser.add_argument(
+        "--skip-dense-heatmaps",
+        action="store_true",
+        help="disable dense decoder activations for memory-constrained sequence training",
+    )
+    parser.add_argument(
+        "--sequence-summary",
+        action="store_true",
+        help="consume the full parent and reduce it to a cap-safe temporal summary",
+    )
     args = parser.parse_args()
     if args.event_only and args.source_event_curriculum:
         raise ValueError("event-only and source-event-curriculum are mutually exclusive")
@@ -58,6 +75,8 @@ def main() -> int:
         raise ValueError("learning-rate must be positive")
     device = torch.device("cuda", torch.cuda.current_device())
     config = research_config()
+    if args.skip_dense_heatmaps:
+        config = replace(config, decode_heatmaps=False)
     construction_context = torch.device(device)
     with construction_context:
         model = AstroMambaHTrainingAdapter(config=config)
@@ -68,7 +87,10 @@ def main() -> int:
     model = model.to(device, dtype=torch.bfloat16)
     if args.checkpoint.exists():
         state = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        model.load_state_dict(state["model"] if "model" in state else state)
+        model.load_state_dict(
+            state["model"] if "model" in state else state,
+            strict=not args.skip_dense_heatmaps,
+        )
 
     if args.phase == "synthetic":
         pair = next(
@@ -90,11 +112,22 @@ def main() -> int:
         if args.manifest is None:
             raise ValueError("--manifest is required for the real phase")
         parent = load_parent(args.manifest, exposure_index=args.exposure_index)
-        batch = next(
-            iter_parented_synthetic_training_batches(
-                (parent,), sample_count=1, start_index=args.view, device="cpu"
-            )
+        parent_stream = iter_parented_synthetic_training_batches(
+            (parent,),
+            sample_count=1,
+            start_index=args.view,
+            device="cpu",
+            sequence_summary=args.sequence_summary,
         )
+        batch = next(parent_stream)
+        # A complete parent sequence is the scientifically correct input, but
+        # keeping the FITS-derived NumPy arrays, float32 batch, and CUDA staging
+        # buffers alive together can exceed the strict host-RSS cap. The model
+        # already trains in BF16, so compact the streamed floating-point input
+        # before moving it to CUDA and release the parent generator immediately.
+        batch = _cast_batch_floating_tensors(batch, torch.bfloat16)
+        del parent_stream, parent
+        gc.collect()
     trainer = BoundedTrainer(
         model,
         config=TrainingConfig(
@@ -192,10 +225,40 @@ def load_parent(manifest_path: Path, *, exposure_index: int | None = None):
     return loader.load(
         records,
         target_id=str(manifest["target"]),
-        source_x=640.0,
-        source_y=360.0,
+        source_x=float(manifest.get("source_x", 640.0)),
+        source_y=float(manifest.get("source_y", 360.0)),
         observation_id=manifest_path.parent.name,
     )
+
+
+def _cast_batch_floating_tensors(batch, dtype: torch.dtype):
+    values = {}
+    for name in (
+        "raster", "wavelength_tokens", "object_tokens", "geometry",
+        "exposure_duration", "coverage_vector", "local_time", "long_time",
+        "coverage_map", "source_xy",
+    ):
+        value = getattr(batch.inputs, name)
+        values[name] = (
+            value.to(dtype=dtype)
+            if isinstance(value, torch.Tensor)
+            and value.is_floating_point()
+            and value.dtype not in (torch.float16, torch.bfloat16)
+            else value
+        )
+    return type(batch)(
+        inputs=type(batch.inputs)(
+            **values,
+            wavelength_mask=batch.inputs.wavelength_mask,
+            object_mask=batch.inputs.object_mask,
+            visit_mask=batch.inputs.visit_mask,
+            step_mask=batch.inputs.step_mask,
+        ),
+        target=batch.target,
+        auxiliary_targets=batch.auxiliary_targets,
+    )
+
+
 
 
 if __name__ == "__main__":

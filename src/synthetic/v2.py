@@ -26,8 +26,14 @@ class HubbleSyntheticV2:
         self.population_sampler = PopulationSampler(seed=seed)
         self.injector = injector or RealParentInjector()
 
-    def generate(self, parent: RealObservationParent, *, sample_index: int = 0) -> HubbleSyntheticV2Result:
-        draw = self.population_sampler.draw(sample_index=sample_index)
+    def generate(
+        self,
+        parent: RealObservationParent,
+        *,
+        sample_index: int = 0,
+        event_type: str | None = None,
+    ) -> HubbleSyntheticV2Result:
+        draw = self.population_sampler.draw(sample_index=sample_index, event_type=event_type)
         # The real parent owns the observing mode.  Never let a synthetic
         # population draw silently change an HST UVIS parent into an IR or
         # Kepler observation.

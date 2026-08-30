@@ -161,12 +161,16 @@ def iter_parented_synthetic_training_batches(
     sample_count: int,
     device: torch.device | str = "cpu",
     start_index: int = 0,
+    sequence_summary: bool = False,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Lazily inject events into real parents and convert one bundle at a time.
 
     Parents must already be loaded at the model's 720x1280 raster size.  The
     function intentionally refuses implicit resizing: changing a parent PSF or
     WCS without recording it would invalidate the real-observation contract.
+    ``sequence_summary`` consumes every frame and reduces the parent to one
+    temporal spatial summary for the GPU path.  It is a cap-safe fallback, not
+    a replacement for full local/long-time sequence processing.
     """
 
     if not isinstance(sample_count, int) or sample_count < 0:
@@ -188,7 +192,12 @@ def iter_parented_synthetic_training_batches(
             for exposure in parent.exposures
         ):
             raise ValueError("parented training requires every parent image to be 720x1280 with science, uncertainty, and dq")
-        result = HubbleSyntheticV2(seed=sample_index).generate(parent, sample_index=sample_index)
+        requested_event = "planet_transit" if sample_index % 2 == 0 else "null"
+        result = HubbleSyntheticV2(seed=sample_index).generate(
+            parent,
+            sample_index=sample_index,
+            event_type=requested_event,
+        )
         selected = result.injection.injected if sample_index % 2 == 0 else result.injection.null
         grouped: dict[str, list[tuple[object, object]]] = {}
         by_id = {exposure.exposure_id: exposure for exposure in parent.exposures}
@@ -199,22 +208,25 @@ def iter_parented_synthetic_training_batches(
         visit_groups = list(grouped.values())
         steps = max(len(group) for group in visit_groups)
         visits = len(visit_groups)
-        raster = np.zeros((1, visits, steps, 6, 720, 1280), dtype=np.float32)
-        wavelength_tokens = np.zeros((1, visits, steps, 1, 8), dtype=np.float32)
+        # The calibrated parent pixels are already normalized and clipped
+        # below.  FP16 storage avoids a second 720p sequence-sized copy while
+        # the GPU worker converts/consumes the batch under autocast.
+        raster = np.zeros((1, visits, steps, 6, 720, 1280), dtype=np.float16)
+        wavelength_tokens = np.zeros((1, visits, steps, 1, 8), dtype=np.float16)
         wavelength_mask = np.zeros((1, visits, steps, 1), dtype=bool)
         parent_objects = parent.object_tokens
         object_count = 1 if parent_objects is None else parent_objects.shape[0]
         if parent_objects is not None and parent_objects.shape[1] != 12:
             raise ValueError("parent object_tokens must have 12 features for AstroMamba-H")
-        object_tokens = np.zeros((1, visits, object_count, 12), dtype=np.float32)
+        object_tokens = np.zeros((1, visits, object_count, 12), dtype=np.float16)
         object_mask = np.ones((1, visits, object_count), dtype=bool)
         if parent.object_mask is not None:
             if parent.object_mask.shape[0] != object_count:
                 raise ValueError("parent object_mask does not match parent object_tokens")
             object_mask[:] = parent.object_mask[None, None, :]
-        geometry = np.zeros((1, visits, steps, 10), dtype=np.float32)
-        exposure_duration = np.ones((1, visits, steps, 1), dtype=np.float32)
-        coverage = np.zeros((1, visits, steps, 6), dtype=np.float32)
+        geometry = np.zeros((1, visits, steps, 10), dtype=np.float16)
+        exposure_duration = np.ones((1, visits, steps, 1), dtype=np.float16)
+        coverage = np.zeros((1, visits, steps, 6), dtype=np.float16)
         local_time = np.zeros((1, visits, steps, 5), dtype=np.float32)
         long_time = np.zeros((1, visits, 5), dtype=np.float32)
         step_valid = np.zeros((1, visits, steps), dtype=bool)
@@ -257,7 +269,7 @@ def iter_parented_synthetic_training_batches(
                         float(np.mean(dq == 0)),
                         1.0,
                     ],
-                    dtype=np.float32,
+                    dtype=np.float16,
                 )
                 wavelength_mask[0, visit_index, step_index, 0] = True
                 observer_position = exposure.observer_position or (0.0, 0.0, 0.0)
@@ -272,7 +284,7 @@ def iter_parented_synthetic_training_batches(
                         float(exposure.pointing.get("boresight_ra_deg", 0.0)) / 360.0,
                         float(exposure.pointing.get("boresight_dec_deg", 0.0)) / 90.0,
                     ],
-                    dtype=np.float32,
+                    dtype=np.float16,
                 )
                 exposure_duration[0, visit_index, step_index, 0] = exposure.exposure_seconds
                 local_time[0, visit_index, step_index] = np.asarray(
@@ -327,6 +339,57 @@ def iter_parented_synthetic_training_batches(
                 ],
                 dtype=np.float32,
             )
+        if sequence_summary:
+            valid_indices = np.flatnonzero(step_valid[0].reshape(-1))
+            frame_values = raster[0].reshape(-1, 6, 720, 1280)[valid_indices]
+            summary = np.zeros((6, 720, 1280), dtype=np.float16)
+            summary[0] = np.median(frame_values[:, 0].astype(np.float32), axis=0).astype(np.float16)
+            summary[1] = np.min(frame_values[:, 1].astype(np.float32), axis=0).astype(np.float16)
+            summary[2] = np.median(frame_values[:, 2].astype(np.float32), axis=0).astype(np.float16)
+            summary[3] = np.max(frame_values[:, 3].astype(np.float32), axis=0).astype(np.float16)
+            summary[4] = np.max(frame_values[:, 4].astype(np.float32), axis=0).astype(np.float16)
+            summary[5] = np.mean(frame_values[:, 5].astype(np.float32), axis=0).astype(np.float16)
+            raster = summary[None, None, None]
+
+            wavelength_values = wavelength_tokens[0].reshape(-1, 1, 8)[valid_indices]
+            wavelength_tokens = np.median(
+                wavelength_values.astype(np.float32), axis=0
+            )[None, None, None].astype(np.float16)
+            wavelength_mask = np.ones((1, 1, 1, 1), dtype=bool)
+            geometry_values = geometry[0].reshape(-1, 10)[valid_indices]
+            geometry = np.mean(geometry_values.astype(np.float32), axis=0)[None, None, None].astype(np.float16)
+            exposure_duration = np.array(
+                [[[float(exposure_duration[0].reshape(-1)[valid_indices].sum())]]],
+                dtype=np.float16,
+            )[..., None]
+            coverage_values = coverage[0].reshape(-1, 6)[valid_indices]
+            coverage = np.mean(coverage_values.astype(np.float32), axis=0)[None, None, None].astype(np.float16)
+            local_values = local_time[0].reshape(-1, 5)[valid_indices]
+            local_time = np.array(
+                [[[[
+                    float(local_values[:, 0].min()),
+                    float(local_values[:, 1].mean()),
+                    float(local_values[:, 2].max()),
+                    float(local_values[:, 3].sum()),
+                    1.0,
+                ]]]],
+                dtype=np.float32,
+            )
+            long_time = np.array(
+                [[[
+                    float(local_values[:, 0].min()),
+                    float(local_values[:, 2].max()),
+                    float(len(valid_indices)),
+                    float(local_values[:, 2].max() - local_values[:, 0].min()),
+                    1.0,
+                ]]],
+                dtype=np.float32,
+            )
+            object_tokens = object_tokens.mean(axis=1, keepdims=True)
+            object_mask = np.any(object_mask, axis=1, keepdims=True)
+            step_valid = np.ones((1, 1, 1), dtype=bool)
+            frame_targets = np.array([[bool(frame_targets.any())]], dtype=np.float32)
+            visits = steps = 1
         inputs = AstroMambaHInputs(
             raster=torch.from_numpy(raster).to(target_device),
             wavelength_tokens=torch.from_numpy(wavelength_tokens).to(target_device),

@@ -71,6 +71,19 @@ def test_parented_stream_emits_full_resolution_model_batches() -> None:
     assert batch.inputs.wavelength_tokens.shape[-1] == 8
     assert batch.inputs.exposure_duration.item() == 12.5
     assert batch.inputs.wavelength_tokens[0, 0, 0, 0, 4].item() == 12.5
+    assert batch.target.item() == 1.0
+    assert batch.auxiliary_targets["frame_event"].any()
+
+    summary = next(
+        iter_parented_synthetic_training_batches(
+            (parent,), sample_count=1, device="cpu", sequence_summary=True
+        )
+    )
+    assert summary.inputs.raster.shape == (1, 1, 1, 6, 720, 1280)
+    assert summary.inputs.local_time.shape == (1, 1, 1, 5)
+    assert summary.inputs.long_time.shape == (1, 1, 5)
+    assert summary.inputs.step_mask.shape == (1, 1, 1)
+    assert summary.target.item() == 1.0
 
 
 def test_parented_stream_labels_null_counterfactual_as_negative() -> None:

@@ -63,3 +63,42 @@ def test_parent_injection_does_not_invent_an_event_outside_window() -> None:
 
     np.testing.assert_array_equal(result.null[0].science, result.injected[0].science)
     assert result.transit_times_bjd_tdb == ()
+
+
+def test_parent_injection_preserves_negative_calibrated_background() -> None:
+    parent = make_parent()
+    science = parent.exposures[0].science.copy()
+    science[0, 0] = -20.0
+    exposure = parent.exposures[0]
+    parent = RealObservationParent(
+        observation_id=parent.observation_id,
+        target_id=parent.target_id,
+        source_x=parent.source_x,
+        source_y=parent.source_y,
+        exposures=(
+            RealExposureParent(
+                exposure_id=exposure.exposure_id,
+                visit_id=exposure.visit_id,
+                instrument=exposure.instrument,
+                detector=exposure.detector,
+                filter_name=exposure.filter_name,
+                t_start_bjd_tdb=exposure.t_start_bjd_tdb,
+                t_end_bjd_tdb=exposure.t_end_bjd_tdb,
+                science=science,
+                uncertainty=exposure.uncertainty,
+                dq=exposure.dq,
+            ),
+        ),
+    )
+    result = RealParentInjector().inject_transit(
+        parent,
+        epoch_bjd_tdb=100.01,
+        period_days=4.0,
+        depth=0.2,
+        duration_days=0.1,
+        source_flux_electrons=5000.0,
+    )
+
+    assert result.null[0].science[0, 0] == -20.0
+    assert result.injected[0].science[0, 0] < 0.0
+    assert np.all(result.injected[0].science <= result.null[0].science)

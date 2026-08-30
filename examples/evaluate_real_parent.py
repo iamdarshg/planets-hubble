@@ -25,7 +25,17 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--exposure-index", type=int, default=0)
+    parser.add_argument(
+        "--exposure-index",
+        type=int,
+        default=None,
+        help="optional single-exposure diagnostic; default evaluates the full parent sequence",
+    )
+    parser.add_argument(
+        "--sequence-summary",
+        action="store_true",
+        help="reduce the complete parent sequence to the cap-safe temporal summary",
+    )
     args = parser.parse_args()
     device = resolve_device(args.device)
     with (torch.device(device) if device.type == "cuda" else nullcontext()):
@@ -38,6 +48,7 @@ def main() -> int:
         (load_parent(args.manifest, exposure_index=args.exposure_index),),
         device=device,
         sample_count=2,
+        sequence_summary=args.sequence_summary,
     )
     print(json.dumps(dataclasses.asdict(report), sort_keys=True))
     return 0

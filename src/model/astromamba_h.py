@@ -79,6 +79,10 @@ class AstroMambaHConfig:
     object_set_blocks: int = 2
     decoder_width: int = 512
     decoder_blocks: int = 3
+    # Dense wavelength heatmaps are required for inference, but are optional
+    # during memory-constrained sequence training when the structured heads
+    # are the active objective.
+    decode_heatmaps: bool = True
 
     def __post_init__(self) -> None:
         if (self.input_height, self.input_width) != (720, 1280):
@@ -695,26 +699,31 @@ class AstroMambaH(nn.Module):
             }
         )
 
-        self.spatial_temporal_decoder = nn.ModuleDict(
-            {
-                "feature_projection": nn.Conv2d(
-                    c1, config.decoder_width, kernel_size=1
-                ),
-                "refinement": nn.ModuleList(
-                    SpatialDecoderBlock(config.decoder_width)
-                    for _ in range(config.decoder_blocks)
-                ),
-                "spatial_factor": nn.Conv2d(
-                    config.decoder_width, config.heatmap_rank, kernel_size=1
-                ),
-                "temporal_factor": nn.Linear(
-                    config.temporal_width,
-                    config.canonical_wavelength_bins
-                    * config.heatmap_features
-                    * config.heatmap_rank,
-                ),
-            }
-        )
+        if config.decode_heatmaps:
+            self.spatial_temporal_decoder = nn.ModuleDict(
+                {
+                    "feature_projection": nn.Conv2d(
+                        c1, config.decoder_width, kernel_size=1
+                    ),
+                    "refinement": nn.ModuleList(
+                        SpatialDecoderBlock(config.decoder_width)
+                        for _ in range(config.decoder_blocks)
+                    ),
+                    "spatial_factor": nn.Conv2d(
+                        config.decoder_width, config.heatmap_rank, kernel_size=1
+                    ),
+                    "temporal_factor": nn.Linear(
+                        config.temporal_width,
+                        config.canonical_wavelength_bins
+                        * config.heatmap_features
+                        * config.heatmap_rank,
+                    ),
+                }
+            )
+        else:
+            # Training-only sequence workers can omit the dense decoder
+            # entirely; its parameters are not involved in structured losses.
+            self.spatial_temporal_decoder = nn.ModuleDict()
         self.prediction_heads = nn.ModuleDict(
             {
                 "candidate": nn.Linear(config.temporal_width, 1),
@@ -890,20 +899,22 @@ class AstroMambaH(nn.Module):
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
-        heatmaps = self._decode_heatmaps(
-            source_map,
-            local_event_tokens.reshape(frame_count, config.temporal_width),
-            raster,
-            availability,
-        )
-        heatmaps = heatmaps.reshape(
-            batch,
-            visits,
-            steps,
-            config.canonical_wavelength_bins,
-            config.heatmap_features,
-            *config.heatmap_size,
-        )
+        heatmaps = None
+        if config.decode_heatmaps:
+            heatmaps = self._decode_heatmaps(
+                source_map,
+                local_event_tokens.reshape(frame_count, config.temporal_width),
+                raster,
+                availability,
+            )
+            heatmaps = heatmaps.reshape(
+                batch,
+                visits,
+                steps,
+                config.canonical_wavelength_bins,
+                config.heatmap_features,
+                *config.heatmap_size,
+            )
         source_heatmap = source_logits_map.sigmoid().reshape(batch, visits, steps, *config.heatmap_size)
         source_event_heatmap = torch.zeros_like(source_heatmap).reshape(frame_count, -1)
         anchor_indices_flat = anchor_indices[:, None, None].expand(batch, visits, steps, -1).reshape(

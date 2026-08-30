@@ -92,7 +92,13 @@ class RealParentInjector:
                 loss = self._paste_at_source(
                     np.zeros_like(science), psf * float(source_flux * drop), parent.source_x, parent.source_y
                 )
-                injected_science = np.clip(science - loss, 0.0, None).astype(np.float32)
+                # The parent is normally a calibrated FLT/FLC/DRZ product,
+                # not a non-negative raw-electron image.  Its sky-subtracted
+                # pixels may legitimately be negative.  Clipping the whole
+                # frame here would turn negative background pixels into an
+                # artificial positive ``injected - null`` signal and make a
+                # detector-background shortcut easier than the transit.
+                injected_science = (science - loss).astype(np.float32)
             injected.append(InjectedExposure(exposure.exposure_id, injected_science, uncertainty, dq, drop))
         return ParentInjectionResult(
             null=tuple(null),

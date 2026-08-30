@@ -250,6 +250,7 @@ def evaluate_parent_injections(
     *,
     device: torch.device | str = "auto",
     sample_count: int,
+    sequence_summary: bool = False,
 ) -> EvaluationReport:
     """Evaluate labeled injected/null counterfactuals from held-out parents."""
     parent_tuple = tuple(parents)
@@ -262,7 +263,10 @@ def evaluate_parent_injections(
     labels: list[int] = []
     with torch.inference_mode():
         for batch in iter_parented_synthetic_training_batches(
-            parent_tuple, sample_count=sample_count, device=target_device
+            parent_tuple,
+            sample_count=sample_count,
+            device=target_device,
+            sequence_summary=sequence_summary,
         ):
             with torch.autocast(
                 device_type=target_device.type,
@@ -270,7 +274,7 @@ def evaluate_parent_injections(
                 enabled=target_device.type == "cuda",
             ):
                 output = model(batch)
-            probabilities = output["global_event_logits"].sigmoid().reshape(-1)
+            probabilities = output["global_event_logits"].float().sigmoid().reshape(-1)
             predictions.extend(float(value) for value in probabilities.cpu())
             labels.extend(int(value) for value in batch.target.reshape(-1).cpu())
     predicted_labels = [int(value >= 0.5) for value in predictions]
