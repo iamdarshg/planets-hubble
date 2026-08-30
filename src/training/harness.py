@@ -303,6 +303,15 @@ def source_event_loss_fn(prediction: Any, batch: Any) -> Tensor:
                 device=source_event_logits.device, dtype=torch.float32
             ).reshape_as(source_event_logits),
         )
+    source_photometry_logits = prediction.get("source_photometry_event_logits")
+    if source_event_target is not None and isinstance(source_photometry_logits, Tensor):
+        direct_target = source_event_target[..., :1].to(
+            device=source_photometry_logits.device, dtype=torch.float32
+        )
+        loss = loss + 0.75 * F.binary_cross_entropy_with_logits(
+            source_photometry_logits,
+            direct_target.reshape_as(source_photometry_logits),
+        )
     return loss
 
 

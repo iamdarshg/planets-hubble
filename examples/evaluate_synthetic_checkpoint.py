@@ -58,6 +58,7 @@ def main() -> int:
             ):
                 output = model(batch)
             logit = output["global_event_logits"].reshape(-1)[0]
+            direct_logit = output["source_photometry_event_logits"].reshape(-1)[0]
             source_logits = output["source_logits"]
             rows.append(
                 {
@@ -65,6 +66,7 @@ def main() -> int:
                     "target": float(batch.target.reshape(-1)[0].cpu()),
                     "global_event_logit": float(logit.float().cpu()),
                     "global_event_probability": float(logit.float().sigmoid().cpu()),
+                    "source_photometry_event_logit": float(direct_logit.float().cpu()),
                     "source_logit_min": float(source_logits.float().min().cpu()),
                     "source_logit_max": float(source_logits.float().max().cpu()),
                 }

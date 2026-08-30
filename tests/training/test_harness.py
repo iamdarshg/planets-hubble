@@ -121,3 +121,28 @@ def test_default_loss_uses_global_and_auxiliary_logits_with_multi_visit_shapes()
     loss.backward()
     assert prediction["head_logits"]["event"].grad is not None
     assert prediction["visit_event_logits"].grad is not None
+
+
+def test_source_event_loss_supervises_direct_source_photometry_head():
+    direct_logits = torch.tensor([[0.0]], requires_grad=True)
+    prediction = {
+        "head_logits": {"event": torch.tensor([0.0], requires_grad=True)},
+        "source_event_logits": torch.zeros((1, 2), requires_grad=True),
+        "source_photometry_event_logits": direct_logits,
+        "source_logits": torch.zeros((1, 1, 1, 90, 160), requires_grad=True),
+    }
+    batch = AstroMambaHTrainingBatch(
+        inputs=make_tiny_adapter_batch(batch_size=1),
+        target=torch.tensor([[1.0]]),
+        auxiliary_targets={
+            "source": torch.zeros((1, 1, 1, 90, 160)),
+            "source_event": torch.tensor([[1.0, 0.0]]),
+        },
+    )
+
+    loss = __import__("training").source_event_loss_fn(prediction, batch)
+    loss.backward()
+
+    assert loss.ndim == 0
+    assert direct_logits.grad is not None
+    assert direct_logits.grad.item() < 0.0
