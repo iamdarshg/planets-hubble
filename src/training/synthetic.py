@@ -334,6 +334,7 @@ def iter_paired_synthetic_training_batches(
     cache_size: int | None = None,
     max_cache_entries: int = MAX_CACHE_ENTRIES,
     max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
+    start_index: int = 0,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Yield null and injected counterfactual views from one shared scene.
 
@@ -341,10 +342,14 @@ def iter_paired_synthetic_training_batches(
     the common noise/nuisance realization for contrastive or ranking losses.
     cache_dir enables the same bounded SSD-backed procedural cache used by
     iter_synthetic_training_batches; cache_size is a total MiB budget.
+    start_index offsets the procedural sample counter so a resumed run can
+    continue from exactly where the previous process stopped.
     """
 
     if not isinstance(sample_count, int) or sample_count < 0:
         raise ValueError("sample_count must be a non-negative integer")
+    if not isinstance(start_index, int) or start_index < 0:
+        raise ValueError("start_index must be a non-negative integer")
     if (config.raster_height, config.raster_width) != (720, 1280):
         raise ValueError("synthetic training batches require a 720x1280 raster config")
     if source_top_k < 1:
@@ -356,7 +361,8 @@ def iter_paired_synthetic_training_batches(
         max_cache_entries=max_cache_entries,
         max_entry_bytes=max_entry_bytes,
     )
-    for sample_index in range(sample_count):
+    for local_index in range(sample_count):
+        sample_index = start_index + local_index
         bundle = _load_or_generate_sample(config, sample_index, cache)
         views = (bundle.null, bundle.injected)
         numpy_views = [bundle.as_model_numpy(name) for name in ("null", "injected")]

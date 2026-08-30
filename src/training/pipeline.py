@@ -94,6 +94,7 @@ def train_synthetic_then_real(
     device: torch.device | str = "auto",
     synthetic_max_steps: int = DEFAULT_SYNTHETIC_MIN_EXAMPLES // 2,
     synthetic_min_examples: int = DEFAULT_SYNTHETIC_MIN_EXAMPLES,
+    synthetic_start_index: int = 0,
     bounded_smoke_test: bool = False,
     synthetic_cache_dir: str | Path | None = DEFAULT_SYNTHETIC_CACHE_DIR,
     synthetic_cache_size: int = DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
@@ -117,6 +118,8 @@ def train_synthetic_then_real(
         raise ValueError("training step budgets must be positive (real may be zero)")
     if synthetic_min_examples < 1:
         raise ValueError("synthetic_min_examples must be positive")
+    if synthetic_start_index < 0:
+        raise ValueError("synthetic_start_index must be non-negative")
     if synthetic_min_examples < DEFAULT_SYNTHETIC_MIN_EXAMPLES and not bounded_smoke_test:
         raise ValueError(
             "synthetic_min_examples below the production minimum requires "
@@ -173,6 +176,7 @@ def train_synthetic_then_real(
         synthetic_cache_dir=synthetic_cache_path,
         synthetic_cache_size=synthetic_cache_size,
         minimum_examples=synthetic_min_examples,
+        start_index=synthetic_start_index,
     )
     synthetic_cache_bytes = _directory_bytes(synthetic_cache_path)
     if synthetic_cache_bytes > synthetic_cache_budget_bytes:
@@ -312,6 +316,7 @@ def _train_phase(
     synthetic_cache_dir: Path | None,
     synthetic_cache_size: int,
     minimum_examples: int | None = None,
+    start_index: int = 0,
 ) -> PhaseReport:
     reports: list[EpochReport] = []
     consecutive = 0
@@ -329,6 +334,7 @@ def _train_phase(
                     cache_dir=synthetic_cache_dir,
                     cache_size=synthetic_cache_size,
                 )
+            stream_kwargs["start_index"] = start_index
             stream: Iterator[AstroMambaHTrainingBatch] = stream_factory(
                 config,
                 **stream_kwargs,

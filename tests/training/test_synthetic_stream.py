@@ -290,3 +290,22 @@ def test_synthetic_quality_targets_follow_observability_masks() -> None:
 
     assert batch.auxiliary_targets["coverage"].item() == 0.5
     assert batch.auxiliary_targets["sufficiency"].item() == 0.5
+
+
+def test_paired_stream_honors_start_index() -> None:
+    config = SyntheticConfig(
+        seed=9,
+        visits=1,
+        local_steps=1,
+        raster_height=720,
+        raster_width=1280,
+        timestamp_jitter_days=0.0,
+    )
+    first = next(iter_paired_synthetic_training_batches(config, sample_count=1, device="cpu"))
+    later = next(
+        iter_paired_synthetic_training_batches(
+            config, sample_count=1, device="cpu", start_index=5
+        )
+    )
+    assert first.target.shape == later.target.shape
+    assert not torch.equal(first.inputs.raster, later.inputs.raster)

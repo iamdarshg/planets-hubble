@@ -40,6 +40,14 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--synthetic-steps", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES // 2)
     parser.add_argument("--synthetic-min-examples", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES)
+    parser.add_argument("--synthetic-start-index", type=int, default=0)
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="optional checkpoint to resume from; enables chunked long training "
+        "with fresh processes so the Windows/CUDA workspace growth never stalls a run",
+    )
     parser.add_argument(
         "--synthetic-cache-dir",
         type=Path,
@@ -77,6 +85,11 @@ def main() -> int:
         model_config = replace(model_config, decode_heatmaps=False)
     with construction_context:
         model = AstroMambaHTrainingAdapter(config=model_config)
+    if args.resume_from is not None:
+        if not args.resume_from.is_file():
+            raise FileNotFoundError(args.resume_from)
+        state = torch.load(args.resume_from, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"] if "model" in state else state, strict=False)
     result = train_synthetic_then_real(
         model=model,
         synthetic_config=SyntheticConfig(
@@ -90,6 +103,7 @@ def main() -> int:
         device=device,
         synthetic_max_steps=args.synthetic_steps,
         synthetic_min_examples=args.synthetic_min_examples,
+        synthetic_start_index=args.synthetic_start_index,
         bounded_smoke_test=args.bounded_smoke_test,
         synthetic_cache_dir=args.synthetic_cache_dir,
         synthetic_cache_size=args.synthetic_cache_size,
