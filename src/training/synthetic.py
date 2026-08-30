@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
+import hashlib
+import json
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -13,6 +17,13 @@ from model import AstroMambaHInputs
 from synthetic import HubbleSyntheticV2, RealObservationParent, SyntheticConfig, SyntheticGenerator
 
 from .adapters import AstroMambaHTrainingBatch
+from .cache import (
+    DEFAULT_MAX_CACHE_BYTES,
+    DEFAULT_MAX_ENTRY_BYTES,
+    MAX_CACHE_ENTRIES,
+    DiskCachePayload,
+    ProceduralSyntheticCache,
+)
 
 
 _PERIOD_CONSTRAINT_STATUS_TO_INDEX = {
@@ -22,6 +33,161 @@ _PERIOD_CONSTRAINT_STATUS_TO_INDEX = {
     "unconstrained": 3,
 }
 _PERIODIC_EVENT_TYPES = {"transit", "stellar_spot_modulation", "eclipsing_binary"}
+
+
+@dataclass
+class _CachedView:
+    arrays: dict[str, np.ndarray]
+    labels: object
+
+
+@dataclass
+class _CachedSyntheticSample:
+    """One generated pair, held only for the current iterator step."""
+
+    null: _CachedView
+    injected: _CachedView
+
+    @property
+    def coverage_vector(self) -> np.ndarray:
+        return self.injected.arrays["coverage_vector"][0]
+
+    def as_model_numpy(self, view_name: str) -> dict[str, np.ndarray]:
+        if view_name == "null":
+            return self.null.arrays
+        if view_name == "injected":
+            return self.injected.arrays
+        raise ValueError("view_name must be null or injected")
+
+
+def _cache_key(config: SyntheticConfig, sample_index: int) -> str:
+    config_json = json.dumps(asdict(config), sort_keys=True, separators=(",", ":"))
+    config_digest = hashlib.sha256(config_json.encode("utf-8")).hexdigest()
+    return f"synthetic-v1-{config_digest}-{sample_index}"
+
+
+def _cache_metadata(view: object, event_mask: np.ndarray) -> dict[str, object]:
+    labels = view.labels
+    return {
+        "latent_positive": bool(labels.latent_positive),
+        "event_type": labels.event_type,
+        "parameter_constraint_status": labels.parameter_constraint_status,
+        "event_mask": event_mask.tolist(),
+    }
+
+
+def _cached_view(
+    arrays: dict[str, np.ndarray], metadata: dict[str, object]
+) -> _CachedView:
+    event_mask = np.asarray(metadata["event_mask"], dtype=np.float32)
+    labels = SimpleNamespace(
+        latent_positive=bool(metadata["latent_positive"]),
+        event_type=metadata.get("event_type"),
+        parameter_constraint_status=metadata.get("parameter_constraint_status"),
+        event_mask=event_mask,
+    )
+    return _CachedView(arrays=arrays, labels=labels)
+
+
+def _sample_from_bundle(bundle: object, config: SyntheticConfig) -> _CachedSyntheticSample:
+    null_mask = _event_mask(bundle.null.labels, config.visits, config.local_steps)
+    injected_mask = _event_mask(bundle.injected.labels, config.visits, config.local_steps)
+    return _CachedSyntheticSample(
+        null=_cached_view(
+            bundle.as_model_numpy("null"), _cache_metadata(bundle.null, null_mask)
+        ),
+        injected=_cached_view(
+            bundle.as_model_numpy("injected"),
+            _cache_metadata(bundle.injected, injected_mask),
+        ),
+    )
+
+
+def _payload_from_sample(
+    sample: _CachedSyntheticSample,
+) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    arrays: dict[str, np.ndarray] = {}
+    for view_name, view in (("null", sample.null), ("injected", sample.injected)):
+        arrays.update({f"{view_name}__{name}": value for name, value in view.arrays.items()})
+    visits, steps = sample.coverage_vector.shape[:2]
+    metadata = {
+        "null": _cache_metadata(
+            sample.null,
+            _event_mask(sample.null.labels, visits, steps),
+        ),
+        "injected": _cache_metadata(
+            sample.injected,
+            _event_mask(sample.injected.labels, visits, steps),
+        ),
+    }
+    return arrays, metadata
+
+
+def _sample_from_payload(payload: DiskCachePayload) -> _CachedSyntheticSample:
+    metadata = payload.metadata
+    if not isinstance(metadata.get("null"), dict) or not isinstance(metadata.get("injected"), dict):
+        raise ValueError("synthetic cache metadata is incomplete")
+    null_arrays = {
+        name.removeprefix("null__"): value
+        for name, value in payload.arrays.items()
+        if name.startswith("null__")
+    }
+    injected_arrays = {
+        name.removeprefix("injected__"): value
+        for name, value in payload.arrays.items()
+        if name.startswith("injected__")
+    }
+    if not null_arrays or not injected_arrays:
+        raise ValueError("synthetic cache entry has no model arrays")
+    return _CachedSyntheticSample(
+        null=_cached_view(null_arrays, metadata["null"]),
+        injected=_cached_view(injected_arrays, metadata["injected"]),
+    )
+
+
+def _load_or_generate_sample(
+    config: SyntheticConfig,
+    sample_index: int,
+    cache: ProceduralSyntheticCache | None,
+) -> _CachedSyntheticSample:
+    key = _cache_key(config, sample_index)
+    if cache is not None:
+        payload = cache.load(key)
+        if payload is not None:
+            try:
+                return _sample_from_payload(payload)
+            except (KeyError, TypeError, ValueError):
+                pass
+    bundle = SyntheticGenerator(replace(config, seed=config.seed + sample_index)).generate()
+    sample = _sample_from_bundle(bundle, config)
+    if cache is not None:
+        arrays, metadata = _payload_from_sample(sample)
+        cache.store(key, arrays, metadata)
+    return sample
+
+
+def _open_cache(
+    cache_dir: str | Path | None,
+    *,
+    cache_size_mib: int | None,
+    max_cache_entries: int,
+    max_entry_bytes: int,
+) -> ProceduralSyntheticCache | None:
+    if cache_dir is None:
+        return None
+    if cache_size_mib is not None and cache_size_mib < 1:
+        raise ValueError("cache_size must be a positive MiB budget")
+    max_cache_bytes = (
+        DEFAULT_MAX_CACHE_BYTES
+        if cache_size_mib is None
+        else cache_size_mib * 1024 * 1024
+    )
+    return ProceduralSyntheticCache(
+        cache_dir,
+        max_cache_entries=max_cache_entries,
+        max_cache_bytes=max_cache_bytes,
+        max_entry_bytes=max_entry_bytes,
+    )
 
 
 def _event_mask(labels: object, visits: int, steps: int) -> np.ndarray:
@@ -95,14 +261,19 @@ def iter_synthetic_training_batches(
     sample_count: int,
     device: torch.device | str = "cpu",
     source_top_k: int = 96,
+    cache_dir: str | Path | None = None,
+    cache_size: int | None = None,
+    max_cache_entries: int = MAX_CACHE_ENTRIES,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Generate one model-ready synthetic sample at a time.
 
-    The iterator intentionally retains no dataset-wide cache.  Each sample is
-    generated, converted to the real AstroMamba-H input contract, yielded, and
-    then becomes eligible for collection when the caller advances the stream.
-    The model contract is fixed at 720x1280, so a full-resolution config is
-    required here even though the standalone generator supports small arrays.
+    Generation is procedural: each sample is created immediately before it is
+    yielded (or loaded from the SSD cache when the same descriptor already
+    exists).  The optional cache_dir names an explicit SSD-backed directory;
+    the cache stores at most max_cache_entries (64 by default) compressed NPZ
+    pairs and never retains full arrays in process memory.  cache_size is an
+    optional total budget in MiB.  With cache_dir=None no cache is used.
     Null and injected views alternate deterministically to provide both
     negative and positive pretraining examples without storing a manifest.
     """
@@ -115,9 +286,14 @@ def iter_synthetic_training_batches(
         raise ValueError("source_top_k must be positive")
 
     target_device = torch.device(device)
+    cache = _open_cache(
+        cache_dir,
+        cache_size_mib=cache_size,
+        max_cache_entries=max_cache_entries,
+        max_entry_bytes=max_entry_bytes,
+    )
     for sample_index in range(sample_count):
-        sample_config = replace(config, seed=config.seed + sample_index)
-        bundle = SyntheticGenerator(sample_config).generate()
+        bundle = _load_or_generate_sample(config, sample_index, cache)
         view_name = "null" if sample_index % 2 else "injected"
         arrays = bundle.as_model_numpy(view_name)
         inputs = AstroMambaHInputs(
@@ -154,11 +330,17 @@ def iter_paired_synthetic_training_batches(
     sample_count: int,
     device: torch.device | str = "cpu",
     source_top_k: int = 96,
+    cache_dir: str | Path | None = None,
+    cache_size: int | None = None,
+    max_cache_entries: int = MAX_CACHE_ENTRIES,
+    max_entry_bytes: int = DEFAULT_MAX_ENTRY_BYTES,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Yield null and injected counterfactual views from one shared scene.
 
     The pair is generated once and stacked along the batch axis, preserving
     the common noise/nuisance realization for contrastive or ranking losses.
+    cache_dir enables the same bounded SSD-backed procedural cache used by
+    iter_synthetic_training_batches; cache_size is a total MiB budget.
     """
 
     if not isinstance(sample_count, int) or sample_count < 0:
@@ -168,9 +350,14 @@ def iter_paired_synthetic_training_batches(
     if source_top_k < 1:
         raise ValueError("source_top_k must be positive")
     target_device = torch.device(device)
+    cache = _open_cache(
+        cache_dir,
+        cache_size_mib=cache_size,
+        max_cache_entries=max_cache_entries,
+        max_entry_bytes=max_entry_bytes,
+    )
     for sample_index in range(sample_count):
-        sample_config = replace(config, seed=config.seed + sample_index)
-        bundle = SyntheticGenerator(sample_config).generate()
+        bundle = _load_or_generate_sample(config, sample_index, cache)
         views = (bundle.null, bundle.injected)
         numpy_views = [bundle.as_model_numpy(name) for name in ("null", "injected")]
         inputs = AstroMambaHInputs(

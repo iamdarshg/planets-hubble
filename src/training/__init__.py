@@ -25,12 +25,22 @@ from .harness import (
     process_rss_bytes,
     resolve_device,
 )
+from .cache import (
+    DEFAULT_MAX_CACHE_BYTES,
+    DEFAULT_MAX_ENTRY_BYTES,
+    MAX_CACHE_ENTRIES,
+    ProceduralSyntheticCache,
+)
 from .synthetic import (
     iter_paired_synthetic_training_batches,
     iter_parented_synthetic_training_batches,
     iter_synthetic_training_batches,
 )
 from .pipeline import (
+    CurriculumGateReport,
+    DEFAULT_SYNTHETIC_CACHE_DIR,
+    DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
+    DEFAULT_SYNTHETIC_MIN_EXAMPLES,
     EvaluationReport,
     PhaseReport,
     evaluate_parent_injections,
@@ -58,6 +68,14 @@ __all__ = [
     "iter_synthetic_training_batches",
     "iter_parented_synthetic_training_batches",
     "iter_paired_synthetic_training_batches",
+    "CurriculumGateReport",
+    "DEFAULT_SYNTHETIC_CACHE_DIR",
+    "DEFAULT_SYNTHETIC_CACHE_SIZE_MIB",
+    "DEFAULT_SYNTHETIC_MIN_EXAMPLES",
+    "MAX_CACHE_ENTRIES",
+    "DEFAULT_MAX_CACHE_BYTES",
+    "DEFAULT_MAX_ENTRY_BYTES",
+    "ProceduralSyntheticCache",
     "EvaluationReport",
     "PhaseReport",
     "evaluate_parent_injections",

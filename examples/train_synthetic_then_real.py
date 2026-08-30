@@ -24,13 +24,38 @@ if str(SRC) not in sys.path:
 
 from model import research_config  # noqa: E402
 from synthetic import SyntheticConfig  # noqa: E402
-from training import AstroMambaHTrainingAdapter, resolve_device, train_synthetic_then_real  # noqa: E402
+from training import (  # noqa: E402
+    DEFAULT_SYNTHETIC_CACHE_DIR,
+    DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
+    DEFAULT_SYNTHETIC_MIN_EXAMPLES,
+    AstroMambaHTrainingAdapter,
+    resolve_device,
+    train_synthetic_then_real,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--synthetic-steps", type=int, default=32)
+    parser.add_argument("--synthetic-steps", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES // 2)
+    parser.add_argument("--synthetic-min-examples", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES)
+    parser.add_argument(
+        "--synthetic-cache-dir",
+        type=Path,
+        default=DEFAULT_SYNTHETIC_CACHE_DIR,
+        help="SSD-backed directory for the bounded procedural cache",
+    )
+    parser.add_argument(
+        "--synthetic-cache-size",
+        type=int,
+        default=DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
+        help="procedural cache budget in MiB",
+    )
+    parser.add_argument(
+        "--bounded-smoke-test",
+        action="store_true",
+        help="allow a smaller synthetic warm-up only for a bounded smoke test",
+    )
     parser.add_argument("--real-steps", type=int, default=16)
     parser.add_argument("--target-loss", type=float, default=0.05)
     parser.add_argument("--target-patience", type=int, default=3)
@@ -53,6 +78,10 @@ def main() -> int:
         ),
         device=device,
         synthetic_max_steps=args.synthetic_steps,
+        synthetic_min_examples=args.synthetic_min_examples,
+        bounded_smoke_test=args.bounded_smoke_test,
+        synthetic_cache_dir=args.synthetic_cache_dir,
+        synthetic_cache_size=args.synthetic_cache_size,
         real_max_steps=args.real_steps,
         target_loss=args.target_loss,
         target_patience=args.target_patience,

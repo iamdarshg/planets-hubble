@@ -59,9 +59,12 @@ stream = iter_synthetic_training_batches(
 ```
 
 The iterator generates one bundle at a time, alternates injected and null
-views, preserves uncertainty and missingness, and does not cache the full
-training set. For counterfactual training with shared nuisance realizations,
-use `iter_paired_synthetic_training_batches`. Synthetic observations are for
+views, preserves uncertainty and missingness, and procedurally regenerates
+examples as training advances. An optional SSD-backed cache keeps up to 64
+compressed generated pairs on disk by default; it retains only a tiny LRU
+index in process memory, never a dataset-sized collection of 720x1280
+tensors. For counterfactual training with shared nuisance realizations, use
+`iter_paired_synthetic_training_batches`. Synthetic observations are for
 pretraining and controlled ablation. Real Hubble products are reserved for
 post-training/fine-tuning and held-out evaluation; large real FITS files
 should remain in external storage, with manifests, hashes, and provenance
@@ -90,20 +93,26 @@ The routine bounded smoke uses the tiny configuration:
 python examples/synthetic_model_smoke.py --device cuda
 ```
 
-The research-size configuration is currently approximately 50M parameters
+The research-size configuration is currently exactly 82,541,531 parameters
 and performs one full-resolution synthetic optimizer step:
 
 ```text
 python examples/synthetic_model_smoke.py --device cuda --research
 ```
 
-The research configuration is intentionally in the 50-65M allocation window:
+The research configuration is in the agreed 82-86M allocation window:
 capacity goes to multi-scale spatial fusion, source-aware modality encoding,
 per-source temporal hierarchy, and the dense decoder. Its temporal backend is
 portable gated-convolution fallback by default and can use Mamba-2 when the
 optional `mamba-ssm` package is installed. The smoke proves finite
 forward/backward/optimizer behavior; it does not prove convergence, scientific
 sensitivity, calibrated probabilities, or an exoplanet discovery.
+
+The two-phase runner procedurally generates synthetic examples during
+pretraining and requires at least 4,096 synthetic views by default before it
+admits real-parent fine-tuning. This is a training-order guard, not a claim
+that 4,096 examples are scientifically sufficient. Use an explicit lower
+warm-up only for bounded tests or debugging.
 
 For a bounded two-phase run, use `training.train_synthetic_then_real`:
 synthetic pretraining runs first, then real-parent injection/fine-tuning is run

@@ -45,14 +45,15 @@ storage written:       0 bytes
 
 The smoke uses the deliberately tiny AstroMamba-H configuration so that it is
 appropriate for a local functional check. The current research preset is
-approximately 50.2M parameters and is construction-tested, but it has not
-yet been trained to convergence.
+82,541,531 parameters and is construction-tested, but it has not yet been
+trained to convergence.
 
 The research preset has also completed a local-GPU inference probe using one
-full-resolution frame:
+full-resolution frame. The current research parameter count is exactly
+82,541,531:
 
 ```text
-parameters:             approximately 50,187,735
+parameters:             82,541,531
 input:                  [1, 1, 1, 6, 720, 1280]
 AMP:                    bfloat16
 heatmap:                [1, 1, 1, 16, 6, 90, 160]
@@ -66,12 +67,14 @@ fits a multi-batch training run or that it has learned exoplanet detection.
 
 The research preset has now also completed a one-batch synthetic training
 smoke. This uses the same full raster contract as the model, performs forward,
-finite-loss validation, backward, and an AdamW optimizer step:
+finite-loss validation, backward, and an optimizer step. The values below
+were recorded when the research preset was approximately 50.2M parameters; the
+82,541,531-parameter preset still requires a fresh measurement:
 
 ```text
 command:                python examples/synthetic_model_smoke.py --device cuda --research
 configuration:          research
-parameters:             approximately 50,187,735
+parameters:             50,187,735 (historical; 82,541,531 preset pending re-measurement)
 input:                  [1, 1, 1, 6, 720, 1280]
 AMP:                    bfloat16
 loss_is_finite:         true
@@ -84,6 +87,13 @@ This is a functional optimization smoke, not convergence evidence. It shows
 that the research-size model can consume a real synthetic full-resolution
 bundle and update its parameters on the local GPU under the available VRAM and
 the revised 1.8 GiB host-RSS cap.
+
+Synthetic pretraining is procedural: the training loop generates the next
+counterfactual bundle while the model is running. A bounded SSD cache can
+retain up to 64 generated entries for reuse, but it does not retain a
+dataset-sized tensor cache in RAM. The two-phase lifecycle admits real-parent
+fine-tuning only after 4,096 synthetic views have actually been consumed. That
+threshold is a curriculum/order guarantee, not scientific sufficiency.
 
 The bounded isolated-worker probes completed multiple synthetic curricula. The
 latest varied-seed direct-source-photometry runs remained finite and
@@ -127,7 +137,7 @@ training/evaluation process must report these measurements; the values below
 are a gate, not a claim that an unmeasured future run is compliant:
 
 ```text
-measured research RSS: 1,842,831,360 bytes for the full research smoke
+measured research RSS: 1,842,831,360 bytes for the full research smoke (historical)
 measured isolated-step RSS: 1,892,282,368 bytes for the largest v7 worker
 RSS cap:                1.80 GiB
 resource violation:     none in the recorded smoke/isolated-step runs
@@ -140,8 +150,10 @@ was outside the revised cap. Research mode now constructs the model directly
 on CUDA, avoiding that migration overhead. The current smoke reports
 `rss_within_cap=true`.
 
-The latest full research smoke measured 50,187,735 parameters, finite loss,
-1,701,552,128 bytes peak CUDA allocation, and 1,842,831,360 bytes process RSS.
+The previous full research smoke (approximately 50.2M parameters) measured
+finite loss, 1,701,552,128 bytes peak CUDA allocation, and 1,842,831,360 bytes
+process RSS. A fresh measurement for the 82,541,531-parameter preset has not
+yet been recorded and is required before presenting any new RSS/VRAM claim.
 The v7 paired real-parent workers also stayed below the cap, with a maximum of
 1,892,282,368 bytes. Current storage accounting is 806,928,292 bytes under
 `artifacts/` and 92,261,232 bytes under `data/`, for 899,189,524 bytes total.

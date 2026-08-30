@@ -689,7 +689,12 @@ The executable pretraining bridge is
 `training.iter_synthetic_training_batches`. It generates one full-resolution
 720x1280 bundle at a time, alternates null and injected views, converts the
 selected view into `AstroMambaHInputs`, and yields a bounded training batch.
-It does not retain a dataset-wide array cache. The standalone
+The procedural stream uses a bounded 64-entry SSD cache by default. Cache
+entries are compressed NPZ pairs on the cache directory; only a small LRU
+index is retained in host memory, so a long run does not keep 64
+full-resolution counterfactual pairs in RAM. The two-phase runner requires at
+least 4,096 synthetic views before real-parent fine-tuning is admitted; the
+threshold is configurable only for explicit smoke/debug runs. The standalone
 `SyntheticGenerator` continues to support smaller rasters for fast physics
 tests and stress checks; full resolution is required at the model-training
 boundary.

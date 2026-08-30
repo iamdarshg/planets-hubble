@@ -3,7 +3,7 @@
 Status: design draft; executable bounded implementation is tracked below
 
 Implementation status (2026-08-30): the repository currently provides a
-50,187,735-parameter research preset with FPN spatial features, persistent
+82,541,531-parameter research preset with FPN spatial features, persistent
 source anchors, optional normalized `source_xy` hints for intentionally
 uncentered patches, wavelength/object/geometry encoders, structured logits,
 source-specific heatmaps, period-constraint probabilities, and per-source

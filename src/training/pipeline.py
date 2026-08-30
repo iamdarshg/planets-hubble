@@ -11,6 +11,8 @@ criterion.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import inspect
+import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -36,6 +38,15 @@ from .synthetic import (
     iter_parented_synthetic_training_batches,
 )
 
+DEFAULT_SYNTHETIC_MIN_EXAMPLES = 4096
+DEFAULT_SYNTHETIC_CACHE_DIR = Path(
+    os.environ.get(
+        "PLANETS_HUBBLE_SYNTHETIC_CACHE_DIR",
+        "artifacts/synthetic-cache",
+    )
+)
+DEFAULT_SYNTHETIC_CACHE_SIZE_MIB = 2048
+
 
 @dataclass(frozen=True)
 class PhaseReport:
@@ -47,6 +58,21 @@ class PhaseReport:
     @property
     def losses(self) -> tuple[float, ...]:
         return tuple(report.last_loss for report in self.reports if report.last_loss is not None)
+
+    @property
+    def examples_seen(self) -> int:
+        """Return the number of examples actually consumed in this phase."""
+        return sum(report.samples_seen for report in self.reports)
+
+
+@dataclass(frozen=True)
+class CurriculumGateReport:
+    """Audit record for admission from synthetic to real-parent training."""
+
+    synthetic_examples_seen: int
+    minimum_synthetic_examples: int
+    is_open: bool
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -65,7 +91,11 @@ def train_synthetic_then_real(
     real_parents: Iterable[RealObservationParent] = (),
     held_out_parents: Iterable[RealObservationParent] = (),
     device: torch.device | str = "auto",
-    synthetic_max_steps: int = 32,
+    synthetic_max_steps: int = DEFAULT_SYNTHETIC_MIN_EXAMPLES // 2,
+    synthetic_min_examples: int = DEFAULT_SYNTHETIC_MIN_EXAMPLES,
+    bounded_smoke_test: bool = False,
+    synthetic_cache_dir: str | Path | None = DEFAULT_SYNTHETIC_CACHE_DIR,
+    synthetic_cache_size: int = DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
     real_max_steps: int = 16,
     target_loss: float = 0.05,
     target_patience: int = 3,
@@ -79,9 +109,33 @@ def train_synthetic_then_real(
     detector flags, cadence, and provenance come from the parent, while the
     event label is supplied by a controlled astrophysical injection.  A pure
     unlabeled real parent can still be scored with :func:`evaluate_unlabeled`.
+    The optional synthetic cache is disk-only: its default is an SSD-oriented
+    D: path, and its integer size is a MiB budget rather than an in-RAM count.
     """
     if synthetic_max_steps < 1 or real_max_steps < 0:
         raise ValueError("training step budgets must be positive (real may be zero)")
+    if synthetic_min_examples < 1:
+        raise ValueError("synthetic_min_examples must be positive")
+    if synthetic_min_examples < DEFAULT_SYNTHETIC_MIN_EXAMPLES and not bounded_smoke_test:
+        raise ValueError(
+            "synthetic_min_examples below the production minimum requires "
+            "bounded_smoke_test=True"
+        )
+    if synthetic_cache_size < 1:
+        raise ValueError("synthetic_cache_size must be positive")
+    synthetic_cache_budget_bytes = synthetic_cache_size * 1024 * 1024
+    if synthetic_cache_budget_bytes > storage_cap_bytes:
+        raise ValueError("synthetic cache budget exceeds storage cap")
+    synthetic_cache_path = _prepare_synthetic_cache_dir(synthetic_cache_dir)
+    synthetic_cache_stream_supported = _stream_supports_synthetic_cache(
+        iter_paired_synthetic_training_batches
+    )
+    cache_bytes_before_training = _directory_bytes(synthetic_cache_path)
+    if cache_bytes_before_training > synthetic_cache_budget_bytes:
+        raise RuntimeError(
+            "synthetic cache exceeds configured budget: "
+            f"{cache_bytes_before_training} > {synthetic_cache_budget_bytes}"
+        )
     if target_loss <= 0.0 or target_patience < 1:
         raise ValueError("target_loss must be positive and target_patience must be >= 1")
     target_device = resolve_device(device)
@@ -115,11 +169,36 @@ def train_synthetic_then_real(
         target_loss,
         target_patience,
         real_parents=None,
+        synthetic_cache_dir=synthetic_cache_path,
+        synthetic_cache_size=synthetic_cache_size,
+        minimum_examples=synthetic_min_examples,
     )
-    synthetic_checkpoint = _save_checkpoint(trainer, output_dir, "synthetic_pretrained.pt", storage_cap_bytes)
+    synthetic_cache_bytes = _directory_bytes(synthetic_cache_path)
+    if synthetic_cache_bytes > synthetic_cache_budget_bytes:
+        raise RuntimeError(
+            "synthetic cache exceeds configured budget: "
+            f"{synthetic_cache_bytes} > {synthetic_cache_budget_bytes}"
+        )
+    synthetic_checkpoint = _save_checkpoint(
+        trainer,
+        output_dir,
+        "synthetic_pretrained.pt",
+        storage_cap_bytes,
+        reserved_storage_bytes=synthetic_cache_bytes,
+    )
+    real_phase_gate = _synthetic_curriculum_gate(
+        synthetic_reports.examples_seen,
+        synthetic_min_examples,
+    )
 
     real_parent_tuple = tuple(real_parents)
-    if real_parent_tuple and real_max_steps:
+    if not real_phase_gate.is_open:
+        real_reports = PhaseReport(
+            phase="real_parent_finetuning",
+            reports=(),
+            stopped_reason=real_phase_gate.reason,
+        )
+    elif real_parent_tuple and real_max_steps:
         real_reports = _train_phase(
             trainer,
             "real_parent_finetuning",
@@ -129,6 +208,9 @@ def train_synthetic_then_real(
             target_loss,
             target_patience,
             real_parents=real_parent_tuple,
+            synthetic_cache_dir=None,
+            synthetic_cache_size=synthetic_cache_size,
+            minimum_examples=None,
         )
     else:
         real_reports = PhaseReport(
@@ -136,7 +218,17 @@ def train_synthetic_then_real(
             reports=(),
             stopped_reason="no real parent exposures supplied" if not real_parent_tuple else "real_max_steps=0",
         )
-    real_checkpoint = _save_checkpoint(trainer, output_dir, "real_finetuned.pt", storage_cap_bytes)
+    real_checkpoint = (
+        _save_checkpoint(
+            trainer,
+            output_dir,
+            "real_finetuned.pt",
+            storage_cap_bytes,
+            reserved_storage_bytes=synthetic_cache_bytes,
+        )
+        if real_phase_gate.is_open and real_parent_tuple and real_max_steps
+        else None
+    )
 
     held_out_tuple = tuple(held_out_parents)
     held_out_eval = evaluate_parent_injections(
@@ -148,6 +240,17 @@ def train_synthetic_then_real(
     return {
         "device": str(target_device),
         "synthetic": synthetic_reports,
+        "synthetic_examples_seen": real_phase_gate.synthetic_examples_seen,
+        "synthetic_min_examples": real_phase_gate.minimum_synthetic_examples,
+        "real_phase_gate": real_phase_gate,
+        "synthetic_cache_path": str(synthetic_cache_path) if synthetic_cache_path else None,
+        "synthetic_cache_bytes": synthetic_cache_bytes,
+        "synthetic_cache_size_mib": synthetic_cache_size,
+        "synthetic_cache_integration_note": (
+            None
+            if synthetic_cache_stream_supported
+            else "pending stream support for cache_dir and cache_size"
+        ),
         "real": real_reports,
         "held_out_real_parent_evaluation": held_out_eval,
         "synthetic_checkpoint": synthetic_checkpoint,
@@ -155,6 +258,44 @@ def train_synthetic_then_real(
         "rss_cap_bytes": rss_cap_bytes,
         "storage_cap_bytes": storage_cap_bytes,
     }
+
+
+def _synthetic_curriculum_gate(
+    synthetic_examples_seen: int,
+    minimum_synthetic_examples: int,
+) -> CurriculumGateReport:
+    """Return whether the lazy synthetic stream has earned real-data admission."""
+    is_open = synthetic_examples_seen >= minimum_synthetic_examples
+    reason = (
+        "synthetic warm-up complete"
+        if is_open
+        else (
+            "synthetic warm-up incomplete: "
+            f"{synthetic_examples_seen}/{minimum_synthetic_examples} synthetic examples seen"
+        )
+    )
+    return CurriculumGateReport(
+        synthetic_examples_seen=synthetic_examples_seen,
+        minimum_synthetic_examples=minimum_synthetic_examples,
+        is_open=is_open,
+        reason=reason,
+    )
+
+
+def _prepare_synthetic_cache_dir(cache_dir: str | Path | None) -> Path | None:
+    """Resolve an explicitly SSD-backed cache path without filling memory."""
+    return Path(cache_dir).resolve() if cache_dir is not None else None
+
+
+def _directory_bytes(directory: Path | None) -> int:
+    if directory is None or not directory.exists():
+        return 0
+    return sum(item.stat().st_size for item in directory.rglob("*") if item.is_file())
+
+
+def _stream_supports_synthetic_cache(stream_factory: Any) -> bool:
+    parameters = inspect.signature(stream_factory).parameters
+    return "cache_dir" in parameters and "cache_size" in parameters
 
 
 def _train_phase(
@@ -167,18 +308,29 @@ def _train_phase(
     target_patience: int,
     *,
     real_parents: tuple[RealObservationParent, ...] | None,
+    synthetic_cache_dir: Path | None,
+    synthetic_cache_size: int,
+    minimum_examples: int | None = None,
 ) -> PhaseReport:
     reports: list[EpochReport] = []
     consecutive = 0
     for step in range(max_steps):
         if real_parents is None:
-            stream: Iterator[AstroMambaHTrainingBatch] = stream_factory(
-                config,
-                sample_count=1,
+            stream_kwargs: dict[str, Any] = {
+                "sample_count": 1,
                 # Keep the counterfactual pair on CPU.  The runner splits it
                 # before BoundedTrainer moves a single view to CUDA; retaining
                 # a full paired GPU batch would defeat the memory bound.
-                device="cpu",
+                "device": "cpu",
+            }
+            if _stream_supports_synthetic_cache(stream_factory):
+                stream_kwargs.update(
+                    cache_dir=synthetic_cache_dir,
+                    cache_size=synthetic_cache_size,
+                )
+            stream: Iterator[AstroMambaHTrainingBatch] = stream_factory(
+                config,
+                **stream_kwargs,
             )
             pair_batch = next(stream)
             step_batches = _split_batch(pair_batch)
@@ -193,7 +345,10 @@ def _train_phase(
             reports.append(report)
             if report.last_loss is not None and report.last_loss <= target_loss:
                 consecutive += 1
-                if consecutive >= target_patience:
+                if (
+                    consecutive >= target_patience
+                    and (minimum_examples is None or trainer.state.samples_seen >= minimum_examples)
+                ):
                     return PhaseReport(phase, tuple(reports), "target_loss_reached")
             else:
                 consecutive = 0
@@ -322,6 +477,8 @@ def _save_checkpoint(
     output_dir: str | Path | None,
     filename: str,
     storage_cap_bytes: int,
+    *,
+    reserved_storage_bytes: int = 0,
 ) -> str | None:
     if output_dir is None:
         return None
@@ -337,6 +494,9 @@ def _save_checkpoint(
         path,
     )
     total = sum(item.stat().st_size for item in directory.rglob("*") if item.is_file())
-    if total > storage_cap_bytes:
-        raise RuntimeError(f"checkpoint storage cap exceeded: {total} > {storage_cap_bytes}")
+    if total + reserved_storage_bytes > storage_cap_bytes:
+        raise RuntimeError(
+            "checkpoint storage cap exceeded: "
+            f"{total + reserved_storage_bytes} > {storage_cap_bytes}"
+        )
     return str(path)
