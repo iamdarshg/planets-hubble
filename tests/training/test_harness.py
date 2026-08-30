@@ -146,3 +146,69 @@ def test_source_event_loss_supervises_direct_source_photometry_head():
     assert loss.ndim == 0
     assert direct_logits.grad is not None
     assert direct_logits.grad.item() < 0.0
+
+
+def test_default_structured_loss_supervises_each_labeled_emitted_level():
+    candidate_heatmap_logits = torch.zeros((1, 1, 1, 2, 3), requires_grad=True)
+    prediction = {
+        "head_logits": {
+            "event": torch.tensor([0.0], requires_grad=True),
+            "candidate": torch.tensor([0.0], requires_grad=True),
+            "visit_event": torch.zeros((1, 1), requires_grad=True),
+            "source_event": torch.zeros((1, 2), requires_grad=True),
+            "frame_event": torch.zeros((1, 1, 1), requires_grad=True),
+            "artifact": torch.tensor([0.0], requires_grad=True),
+            "coverage": torch.tensor([0.0], requires_grad=True),
+            "sufficiency": torch.tensor([0.0], requires_grad=True),
+            "period_constraint": torch.zeros((1, 4), requires_grad=True),
+        },
+        "candidate_heatmap": candidate_heatmap_logits.sigmoid(),
+        "source_logits": torch.zeros((1, 1, 1, 2, 3), requires_grad=True),
+    }
+    batch = AstroMambaHTrainingBatch(
+        inputs=make_tiny_adapter_batch(batch_size=1),
+        target=torch.tensor([[1.0]]),
+        auxiliary_targets={
+            "candidate": torch.tensor([1.0]),
+            "candidate_heatmap": torch.ones((1, 1, 1, 2, 3)),
+            "source": torch.ones((1, 1, 1, 2, 3)),
+            "visit_event": torch.ones((1, 1)),
+            "source_event": torch.tensor([[1.0, 0.0]]),
+            "frame_event": torch.ones((1, 1, 1)),
+            "artifact": torch.zeros(1),
+            "coverage": torch.ones(1),
+            "sufficiency": torch.ones(1),
+            "period_constraint": torch.tensor([1]),
+        },
+    )
+
+    loss = __import__("training").default_loss_fn(prediction, batch)
+    loss.backward()
+
+    assert loss.ndim == 0
+    assert prediction["candidate_heatmap"].grad_fn is not None
+    assert candidate_heatmap_logits.grad is not None
+    for logits in prediction["head_logits"].values():
+        assert logits.grad is not None
+    assert prediction["source_logits"].grad is not None
+
+
+def test_gradient_coverage_guard_can_require_every_trainable_parameter():
+    class PartiallyConnectedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.used = nn.Parameter(torch.ones(()))
+            self.unused = nn.Parameter(torch.ones(()))
+
+        def forward(self, batch):
+            return self.used * batch.target
+
+    trainer = BoundedTrainer(
+        PartiallyConnectedModel(),
+        config=TrainingConfig(
+            device="cpu", max_batches_per_epoch=1, min_gradient_coverage=1.0
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="gradient coverage"):
+        trainer.train_epoch([make_tiny_adapter_batch(batch_size=1)])

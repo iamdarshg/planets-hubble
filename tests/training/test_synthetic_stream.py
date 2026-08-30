@@ -30,10 +30,23 @@ def test_synthetic_training_stream_is_lazy_and_emits_model_batches() -> None:
     assert first.inputs.wavelength_tokens.shape == (1, 1, 1, 2, 8)
     assert first.inputs.wavelength_mask.dtype == torch.bool
     assert torch.isfinite(first.target).all()
+    assert first.auxiliary_targets["candidate_heatmap"].shape == (1, 1, 1, 90, 160)
+    assert first.auxiliary_targets["source"].shape == (1, 1, 1, 90, 160)
+    assert first.auxiliary_targets["candidate_heatmap"].sum() > 0
+    assert torch.equal(
+        first.auxiliary_targets["source"], first.auxiliary_targets["candidate_heatmap"]
+    )
+    assert "artifact" not in first.auxiliary_targets
+    assert "ood" not in first.auxiliary_targets
+    assert "period_constraint" in first.auxiliary_targets
+    assert first.auxiliary_targets["period_constraint"].tolist() == [1]
 
     second = next(stream)
     assert second.inputs.raster.shape == first.inputs.raster.shape
     assert not torch.equal(first.inputs.wavelength_tokens, second.inputs.wavelength_tokens)
+    assert torch.count_nonzero(second.auxiliary_targets["candidate_heatmap"]) == 0
+    assert torch.count_nonzero(second.auxiliary_targets["source"]) > 0
+    assert "period_constraint" not in second.auxiliary_targets
 
     try:
         next(stream)
@@ -132,3 +145,44 @@ def test_paired_stream_keeps_null_and_injected_counterfactuals_together() -> Non
     assert batch.inputs.raster.shape == (2, 1, 1, 6, 720, 1280)
     assert batch.target[:, 0].tolist() == [0.0, 1.0]
     assert batch.auxiliary_targets["frame_event"].shape == (2, 1, 1)
+    for name in (
+        "geometry",
+        "exposure_duration",
+        "coverage_vector",
+        "local_time",
+        "long_time",
+        "object_tokens",
+        "object_mask",
+        "wavelength_mask",
+    ):
+        values = getattr(batch.inputs, name)
+        assert torch.equal(values[0], values[1]), name
+    assert torch.equal(
+        batch.inputs.raster[0, :, :, 2:, :, :],
+        batch.inputs.raster[1, :, :, 2:, :, :],
+    )
+    assert torch.equal(
+        batch.inputs.wavelength_tokens[0, ..., (0, 3, 4, 5, 6, 7)],
+        batch.inputs.wavelength_tokens[1, ..., (0, 3, 4, 5, 6, 7)],
+    )
+    assert torch.equal(batch.auxiliary_targets["source"][0], batch.auxiliary_targets["source"][1])
+    assert torch.equal(
+        batch.auxiliary_targets["candidate_heatmap"][0],
+        batch.auxiliary_targets["source"][0] * batch.auxiliary_targets["frame_event"][0, ..., None, None],
+    )
+
+
+def test_synthetic_quality_targets_follow_observability_masks() -> None:
+    config = SyntheticConfig(
+        seed=44,
+        visits=1,
+        local_steps=2,
+        raster_height=720,
+        raster_width=1280,
+        invalid_exposures=((0, 1),),
+        timestamp_jitter_days=0.0,
+    )
+    batch = next(iter_synthetic_training_batches(config, sample_count=1, device="cpu"))
+
+    assert batch.auxiliary_targets["coverage"].item() == 0.5
+    assert batch.auxiliary_targets["sufficiency"].item() == 0.5

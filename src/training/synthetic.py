@@ -15,6 +15,80 @@ from synthetic import HubbleSyntheticV2, RealObservationParent, SyntheticConfig,
 from .adapters import AstroMambaHTrainingBatch
 
 
+_PERIOD_CONSTRAINT_STATUS_TO_INDEX = {
+    "well_constrained": 0,
+    "weakly_constrained": 1,
+    "prior_dominated": 2,
+    "unconstrained": 3,
+}
+_PERIODIC_EVENT_TYPES = {"transit", "stellar_spot_modulation", "eclipsing_binary"}
+
+
+def _event_mask(labels: object, visits: int, steps: int) -> np.ndarray:
+    value = getattr(labels, "event_mask", None)
+    if value is None:
+        return np.zeros((visits, steps), dtype=np.float32)
+    mask = np.asarray(value, dtype=np.float32)
+    if mask.shape != (visits, steps):
+        raise ValueError("synthetic event_mask shape does not match the configured sequence")
+    return mask
+
+
+def _period_constraint_target(labels: object) -> int | None:
+    event_type = getattr(labels, "event_type", None)
+    if not getattr(labels, "latent_positive", False) or event_type not in _PERIODIC_EVENT_TYPES:
+        return None
+    status = getattr(labels, "parameter_constraint_status", None)
+    if status == "unconstrained":
+        return None
+    return _PERIOD_CONSTRAINT_STATUS_TO_INDEX.get(status)
+
+
+def _synthetic_auxiliary_targets(
+    bundle: object,
+    view: object,
+    *,
+    source_x: float,
+    source_y: float,
+    target_device: torch.device,
+    source_top_k: int,
+) -> dict[str, torch.Tensor]:
+    visits, steps = bundle.coverage_vector.shape[:2]
+    event_mask = _event_mask(view.labels, visits, steps)
+    source_target = _source_target_map(visits, steps, source_x, source_y)
+    candidate_target = source_target * event_mask[..., None, None]
+    result = {
+        "candidate": torch.tensor(
+            [float(view.labels.latent_positive)], dtype=torch.float32, device=target_device
+        ),
+        "candidate_heatmap": torch.from_numpy(candidate_target[None]).to(target_device),
+        "source": torch.from_numpy(source_target[None]).to(target_device),
+        "artifact": None,
+        "ood": None,
+        "coverage": torch.tensor(
+            [float(np.mean(bundle.coverage_vector[..., 0]))],
+            dtype=torch.float32,
+            device=target_device,
+        ),
+        "sufficiency": torch.tensor(
+            [float(np.mean(bundle.coverage_vector[..., 2]))],
+            dtype=torch.float32,
+            device=target_device,
+        ),
+        "visit_event": torch.from_numpy(event_mask.any(axis=1).astype(np.float32))[None].to(target_device),
+        "frame_event": torch.from_numpy(event_mask)[None].to(target_device),
+        "source_event": torch.from_numpy(
+            _source_event_target(bool(view.labels.latent_positive), source_top_k)
+        )[None].to(target_device),
+    }
+    period_target = _period_constraint_target(view.labels)
+    if period_target is not None:
+        result["period_constraint"] = torch.tensor(
+            [period_target], dtype=torch.long, device=target_device
+        )
+    return {name: value for name, value in result.items() if value is not None}
+
+
 def iter_synthetic_training_batches(
     config: SyntheticConfig,
     *,
@@ -61,26 +135,14 @@ def iter_synthetic_training_batches(
             dtype=torch.float32,
             device=target_device,
         )
-        event_mask = view.labels.event_mask
-        if event_mask is None:
-            event_mask = np.zeros((config.visits, config.local_steps), dtype=np.float32)
-        else:
-            event_mask = event_mask.astype(np.float32, copy=False)
-        auxiliary_targets = {
-            "candidate": target[:, 0],
-            "artifact": torch.zeros(1, device=target_device),
-            "ood": torch.zeros(1, device=target_device),
-            "coverage": torch.ones(1, device=target_device),
-            "sufficiency": torch.ones(1, device=target_device),
-            "visit_event": torch.from_numpy(event_mask.any(axis=1).astype(np.float32))[None].to(target_device),
-            "frame_event": torch.from_numpy(event_mask)[None].to(target_device),
-            "source": torch.from_numpy(
-                _source_target_map(config.visits, config.local_steps, config.source_x, config.source_y)
-            )[None].to(target_device),
-            "source_event": torch.from_numpy(
-                _source_event_target(bool(view.labels.latent_positive), source_top_k)
-            )[None].to(target_device),
-        }
+        auxiliary_targets = _synthetic_auxiliary_targets(
+            bundle,
+            view,
+            source_x=config.source_x,
+            source_y=config.source_y,
+            target_device=target_device,
+            source_top_k=source_top_k,
+        )
         yield AstroMambaHTrainingBatch(
             inputs=inputs, target=target, auxiliary_targets=auxiliary_targets
         )
@@ -131,44 +193,52 @@ def iter_paired_synthetic_training_batches(
         )
         frame_targets = []
         visit_targets = []
+        candidate_targets = []
+        source_targets = []
+        coverage_targets = []
+        sufficiency_targets = []
         for view in views:
-            mask = view.labels.event_mask
-            if mask is None:
-                mask = np.zeros((config.visits, config.local_steps), dtype=np.float32)
-            else:
-                mask = mask.astype(np.float32, copy=False)
+            mask = _event_mask(view.labels, config.visits, config.local_steps)
+            source_target = _source_target_map(
+                config.visits, config.local_steps, config.source_x, config.source_y
+            )
             frame_targets.append(torch.from_numpy(mask))
             visit_targets.append(torch.from_numpy(mask.any(axis=1).astype(np.float32)))
+            source_targets.append(torch.from_numpy(source_target))
+            candidate_targets.append(torch.from_numpy(source_target * mask[..., None, None]))
+            coverage_targets.append(float(np.mean(bundle.coverage_vector[..., 0])))
+            sufficiency_targets.append(float(np.mean(bundle.coverage_vector[..., 2])))
+        period_targets = [
+            _period_constraint_target(view.labels) for view in views
+        ]
+        auxiliary_targets = {
+            "candidate": targets[:, 0],
+            "candidate_heatmap": torch.stack(candidate_targets).to(target_device),
+            "source": torch.stack(source_targets).to(target_device),
+            "coverage": torch.tensor(coverage_targets, dtype=torch.float32, device=target_device),
+            "sufficiency": torch.tensor(
+                sufficiency_targets, dtype=torch.float32, device=target_device
+            ),
+            "frame_event": torch.stack(frame_targets).to(target_device),
+            "visit_event": torch.stack(visit_targets).to(target_device),
+            "source_event": torch.from_numpy(
+                np.stack(
+                    [
+                        _source_event_target(bool(view.labels.latent_positive), source_top_k)
+                        for view in views
+                    ]
+                )
+            ).to(target_device),
+        }
+        valid_period_targets = [value for value in period_targets if value is not None]
+        if len(valid_period_targets) == len(period_targets):
+            auxiliary_targets["period_constraint"] = torch.tensor(
+                valid_period_targets, dtype=torch.long, device=target_device
+            )
         yield AstroMambaHTrainingBatch(
             inputs=inputs,
             target=targets,
-            auxiliary_targets={
-                "candidate": targets[:, 0],
-                "artifact": torch.zeros(2, device=target_device),
-                "ood": torch.zeros(2, device=target_device),
-                "coverage": torch.ones(2, device=target_device),
-                "sufficiency": torch.ones(2, device=target_device),
-                "frame_event": torch.stack(frame_targets).to(target_device),
-                "visit_event": torch.stack(visit_targets).to(target_device),
-                "source": torch.from_numpy(
-                    np.stack(
-                        [
-                            _source_target_map(
-                                config.visits, config.local_steps, config.source_x, config.source_y
-                            )
-                            for _ in range(2)
-                        ]
-                    )
-                ).to(target_device),
-                "source_event": torch.from_numpy(
-                    np.stack(
-                        [
-                            _source_event_target(bool(view.labels.latent_positive), source_top_k)
-                            for view in views
-                        ]
-                    )
-                ).to(target_device),
-            },
+            auxiliary_targets=auxiliary_targets,
         )
 
 
@@ -363,6 +433,11 @@ def iter_parented_synthetic_training_batches(
                 ],
                 dtype=np.float32,
             )
+        # Quality labels are derived from observed validity/DQ coverage. The
+        # parent injector has no artifact or OOD truth, so those heads remain
+        # intentionally unsupervised for this stream.
+        coverage_target = float(np.mean(coverage[..., 1]))
+        sufficiency_target = float(np.mean(coverage[..., 1] * coverage[..., 2]))
         if sequence_summary:
             valid_indices = np.flatnonzero(step_valid[0].reshape(-1))
             frame_values = raster[0].reshape(-1, 6, 720, 1280)[valid_indices]
@@ -443,20 +518,25 @@ def iter_parented_synthetic_training_batches(
             dtype=torch.float32,
             device=target_device,
         )
+        source_target = _source_target_map(
+            visits, steps, parent.source_x / 1280.0, parent.source_y / 720.0
+        )
+        candidate_target = source_target * frame_targets[..., None, None]
         yield AstroMambaHTrainingBatch(
             inputs=inputs,
             target=target,
             auxiliary_targets={
                 "candidate": target[:, 0],
-                "artifact": torch.zeros(1, device=target_device),
-                "ood": torch.zeros(1, device=target_device),
-                "coverage": torch.from_numpy(step_valid.mean(axis=(1, 2))).to(target_device),
-                "sufficiency": torch.from_numpy(step_valid.mean(axis=(1, 2))).to(target_device),
+                "candidate_heatmap": torch.from_numpy(candidate_target[None]).to(target_device),
+                "source": torch.from_numpy(source_target[None]).to(target_device),
+                "coverage": torch.tensor(
+                    [coverage_target], dtype=torch.float32, device=target_device
+                ),
+                "sufficiency": torch.tensor(
+                    [sufficiency_target], dtype=torch.float32, device=target_device
+                ),
                 "visit_event": torch.from_numpy(frame_targets.any(axis=1)[None]).to(target_device),
                 "frame_event": torch.from_numpy(frame_targets[None]).to(target_device),
-                "source": torch.from_numpy(
-                    _source_target_map(visits, steps, parent.source_x / 1280.0, parent.source_y / 720.0)[None]
-                ).to(target_device),
                 "source_event": torch.from_numpy(
                     _source_event_target(
                         bool(any(item.relative_flux_drop > 0.0 for item in selected)),

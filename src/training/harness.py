@@ -75,6 +75,7 @@ class TrainingConfig:
     weight_decay: float = 0.0
     amp: AmpRequest = "auto"
     grad_clip_norm: Optional[float] = None
+    min_gradient_coverage: float = 0.0
     rss_cap_bytes: int = DEFAULT_RSS_CAP_BYTES
     storage_cap_bytes: int = DEFAULT_STORAGE_CAP_BYTES
 
@@ -87,6 +88,8 @@ class TrainingConfig:
             raise ValueError("weight_decay cannot be negative")
         if self.grad_clip_norm is not None and self.grad_clip_norm <= 0.0:
             raise ValueError("grad_clip_norm must be positive when provided")
+        if not 0.0 <= self.min_gradient_coverage <= 1.0:
+            raise ValueError("min_gradient_coverage must be in [0, 1]")
         if self.rss_cap_bytes < 1 or self.storage_cap_bytes < 1:
             raise ValueError("resource caps must be positive")
         if self.amp not in ("auto", True, False):
@@ -124,6 +127,7 @@ class EpochReport:
     resource_cap_violations: tuple[str, ...]
     peak_gpu_memory_bytes: Optional[int] = None
     process_rss_bytes: Optional[int] = None
+    gradient_coverage: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +185,12 @@ def _target_from_batch(batch: Any) -> Tensor:
 
 
 def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
-    """Structured BCE loss that prefers logits and respects training levels."""
+    """Structured loss for labels at their emitted spatial/temporal levels.
+
+    Auxiliary targets are opt-in. A missing target means that the simulator or
+    parent data did not establish that supervision contract; it must not be
+    replaced by a made-up constant quality or artifact label.
+    """
 
     target = _target_from_batch(batch).to(dtype=torch.float32)
     if isinstance(prediction, Mapping):
@@ -197,20 +206,32 @@ def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
             auxiliary_targets = getattr(batch, "auxiliary_targets", {})
             if not auxiliary_targets and isinstance(batch, Mapping):
                 auxiliary_targets = batch.get("auxiliary_targets", {})
+            orbit = prediction.get("orbit", {})
+            if not isinstance(orbit, Mapping):
+                orbit = {}
             auxiliary_predictions = {
                 "candidate": head_logits.get("candidate"),
+                "candidate_heatmap": prediction.get(
+                    "candidate_heatmap_logits", prediction.get("candidate_heatmap")
+                ),
                 "artifact": head_logits.get("artifact"),
                 "ood": head_logits.get("ood"),
                 "coverage": head_logits.get("coverage"),
                 "sufficiency": head_logits.get("sufficiency"),
-                "visit_event": prediction.get("visit_event_logits"),
-                "source_event": prediction.get("source_event_logits"),
-                "frame_event": prediction.get("frame_event_logits"),
+                "visit_event": prediction.get("visit_event_logits", head_logits.get("visit_event")),
+                "source_event": prediction.get("source_event_logits", head_logits.get("source_event")),
+                "frame_event": prediction.get("frame_event_logits", head_logits.get("frame_event")),
                 "source": prediction.get("source_logits"),
-                "period_constraint": prediction.get("orbit", {}).get("constraint_logits"),
+                "source_heatmap": prediction.get(
+                    "source_heatmap_logits", prediction.get("source_heatmap")
+                ),
+                "period_constraint": head_logits.get(
+                    "period_constraint", orbit.get("constraint_logits")
+                ),
             }
             weights = {
                 "candidate": 0.5,
+                "candidate_heatmap": 1.0,
                 "artifact": 0.25,
                 "ood": 0.25,
                 "coverage": 0.25,
@@ -219,15 +240,27 @@ def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
                 "source_event": 0.5,
                 "frame_event": 0.5,
                 "source": 0.5,
+                "source_heatmap": 0.5,
             }
             for name, auxiliary_target in auxiliary_targets.items():
                 logits = auxiliary_predictions.get(name)
-                if logits is None:
+                if logits is None or auxiliary_target is None:
                     continue
                 if name == "period_constraint":
                     loss = loss + weights.get(name, 0.5) * F.cross_entropy(
                         logits,
                         auxiliary_target.to(device=logits.device, dtype=torch.long).reshape(-1),
+                    )
+                    continue
+                if name in {"candidate_heatmap", "source_heatmap"}:
+                    # These model outputs are currently probabilities, while
+                    # source_logits remains a raw logit.
+                    probabilities = logits.float().clamp(1.0e-6, 1.0 - 1.0e-6)
+                    loss = loss + weights.get(name, 0.5) * F.binary_cross_entropy(
+                        probabilities,
+                        auxiliary_target.to(
+                            device=logits.device, dtype=torch.float32
+                        ).reshape_as(probabilities),
                     )
                     continue
                 loss = loss + weights.get(name, 0.25) * F.binary_cross_entropy_with_logits(
@@ -328,6 +361,17 @@ def _finite_gradients(model: nn.Module) -> bool:
     return True
 
 
+def _gradient_coverage(model: nn.Module) -> float:
+    """Return the fraction of trainable parameter elements with gradients."""
+
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    total = sum(parameter.numel() for parameter in trainable)
+    covered = sum(parameter.numel() for parameter in trainable if parameter.grad is not None)
+    if total == 0:
+        raise RuntimeError("model has no trainable parameters")
+    return covered / total
+
+
 def _tensor_stats(state: Mapping[str, Any]) -> tuple[int, int]:
     count = 0
     total_bytes = 0
@@ -406,6 +450,7 @@ class BoundedTrainer:
         self.model.train()
         epoch_batches = 0
         epoch_samples = 0
+        epoch_gradient_coverage: Optional[float] = None
         peak_gpu_memory = None
         if self.device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
@@ -435,6 +480,18 @@ class BoundedTrainer:
                 scaled_loss.backward()
             if not _finite_gradients(self.model):
                 raise NonFiniteTrainingError("gradient is not finite")
+            gradient_coverage = _gradient_coverage(self.model)
+            epoch_gradient_coverage = (
+                gradient_coverage
+                if epoch_gradient_coverage is None
+                else min(epoch_gradient_coverage, gradient_coverage)
+            )
+            if gradient_coverage < self.config.min_gradient_coverage:
+                raise RuntimeError(
+                    "gradient coverage "
+                    f"{gradient_coverage:.3f} is below required "
+                    f"{self.config.min_gradient_coverage:.3f}"
+                )
             should_step = (epoch_batches + 1) % accumulation_steps == 0
             if should_step:
                 if self.config.grad_clip_norm is not None:
@@ -506,6 +563,7 @@ class BoundedTrainer:
             resource_cap_violations=tuple(violations),
             peak_gpu_memory_bytes=peak_gpu_memory,
             process_rss_bytes=rss,
+            gradient_coverage=epoch_gradient_coverage,
         )
 
     def checkpoint_report(self) -> CheckpointReport:
