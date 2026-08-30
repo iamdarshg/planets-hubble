@@ -36,7 +36,9 @@ from training import (  # noqa: E402
     resolve_device,
     tiny_astromamba_config,
 )
-def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBatch:
+def make_synthetic_training_batch(
+    device: torch.device, *, source_top_k: int = 96
+) -> AstroMambaHTrainingBatch:
     """Create one full-raster normalized bundle without writing an artifact."""
 
     return next(
@@ -51,6 +53,7 @@ def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBa
             ),
             sample_count=1,
             device=device,
+            source_top_k=source_top_k,
         )
     )
 
@@ -58,7 +61,7 @@ def make_synthetic_training_batch(device: torch.device) -> AstroMambaHTrainingBa
 def run(device_request: str = "auto", *, research: bool = False) -> dict[str, object]:
     device = resolve_device(device_request)
     config = research_config() if research else tiny_astromamba_config()
-    batch = make_synthetic_training_batch(device)
+    batch = make_synthetic_training_batch(device, source_top_k=config.source_top_k)
     construction_context = (
         torch.device(device) if research and device.type == "cuda" else nullcontext()
     )

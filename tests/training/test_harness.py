@@ -193,6 +193,39 @@ def test_default_structured_loss_supervises_each_labeled_emitted_level():
     assert prediction["source_logits"].grad is not None
 
 
+def test_probability_auxiliary_loss_is_safe_inside_cuda_autocast():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to exercise PyTorch's BCELoss autocast guard")
+
+    device = torch.device("cuda")
+    candidate_heatmap = torch.full(
+        (1, 1, 1, 2, 3), 0.5, device=device, requires_grad=True
+    )
+    source_heatmap = torch.full(
+        (1, 1, 1, 2, 3), 0.5, device=device, requires_grad=True
+    )
+    prediction = {
+        "head_logits": {
+            "event": torch.zeros(1, device=device, requires_grad=True),
+        },
+        "candidate_heatmap": candidate_heatmap,
+        "source_heatmap": source_heatmap,
+    }
+    batch = make_tiny_adapter_batch(batch_size=1).to(device)
+    batch.auxiliary_targets = {
+        "candidate_heatmap": torch.ones((1, 1, 1, 2, 3), device=device),
+        "source_heatmap": torch.ones((1, 1, 1, 2, 3), device=device),
+    }
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        loss = __import__("training").default_loss_fn(prediction, batch)
+
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert candidate_heatmap.grad is not None
+    assert source_heatmap.grad is not None
+
+
 def test_gradient_coverage_guard_can_require_every_trainable_parameter():
     class PartiallyConnectedModel(nn.Module):
         def __init__(self):

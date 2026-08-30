@@ -256,12 +256,17 @@ def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
                     # These model outputs are currently probabilities, while
                     # source_logits remains a raw logit.
                     probabilities = logits.float().clamp(1.0e-6, 1.0 - 1.0e-6)
-                    loss = loss + weights.get(name, 0.5) * F.binary_cross_entropy(
-                        probabilities,
-                        auxiliary_target.to(
-                            device=logits.device, dtype=torch.float32
-                        ).reshape_as(probabilities),
-                    )
+                    with torch.autocast(
+                        device_type=logits.device.type,
+                        enabled=False,
+                    ):
+                        probability_loss = F.binary_cross_entropy(
+                            probabilities,
+                            auxiliary_target.to(
+                                device=logits.device, dtype=torch.float32
+                            ).reshape_as(probabilities),
+                        )
+                    loss = loss + weights.get(name, 0.5) * probability_loss
                     continue
                 loss = loss + weights.get(name, 0.25) * F.binary_cross_entropy_with_logits(
                     logits,

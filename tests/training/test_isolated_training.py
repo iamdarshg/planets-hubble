@@ -24,6 +24,12 @@ assert _WORKER_SPEC is not None and _WORKER_SPEC.loader is not None
 _WORKER_MODULE = importlib.util.module_from_spec(_WORKER_SPEC)
 _WORKER_SPEC.loader.exec_module(_WORKER_MODULE)
 prepare_worker_batch = _WORKER_MODULE.prepare_worker_batch
+_SMOKE_SPEC = importlib.util.spec_from_file_location(
+    "synthetic_model_smoke", Path(__file__).parents[2] / "examples" / "synthetic_model_smoke.py"
+)
+assert _SMOKE_SPEC is not None and _SMOKE_SPEC.loader is not None
+_SMOKE_MODULE = importlib.util.module_from_spec(_SMOKE_SPEC)
+_SMOKE_SPEC.loader.exec_module(_SMOKE_MODULE)
 
 
 def _optional(module, name):
@@ -210,3 +216,20 @@ def test_worker_auto_device_resolution_uses_training_device_policy() -> None:
     assert callable(resolver), "worker must resolve the auto device through the training policy"
     resolved = resolver("auto")
     assert resolved.type in {"cpu", "cuda"}
+
+
+def test_smoke_batch_accepts_model_source_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_stream(config, *, sample_count, device, source_top_k):
+        captured["source_top_k"] = source_top_k
+        captured["sample_count"] = sample_count
+        captured["device"] = device
+        yield object()
+
+    monkeypatch.setattr(_SMOKE_MODULE, "iter_synthetic_training_batches", fake_stream)
+
+    result = _SMOKE_MODULE.make_synthetic_training_batch("cpu", source_top_k=1)
+
+    assert result is not None
+    assert captured == {"source_top_k": 1, "sample_count": 1, "device": "cpu"}
