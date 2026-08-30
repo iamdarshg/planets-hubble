@@ -235,3 +235,18 @@ def test_real_manifest_reports_blocked_external_manifest_assets(tmp_path: Path) 
     assert _read_jsonl(output) == []
     assert summary["counts"]["records"] == 0
     assert summary["blocked_external_assets"] == ["target/remote.fits"]
+
+
+def test_real_manifest_record_ids_are_unique_for_duplicate_payloads(tmp_path: Path) -> None:
+    source = tmp_path / "real"
+    first = source / "target" / "first.npz"
+    second = source / "target" / "second.npz"
+    _write_payload(first, b"same-payload")
+    _write_payload(second, b"same-payload")
+
+    output = tmp_path / "real.jsonl"
+    MODULE.build_real_manifest(source, output, max_records=4, max_bytes=100)
+
+    records = _read_jsonl(output)
+    assert len(records) == 2
+    assert len({record["record_id"] for record in records}) == 2

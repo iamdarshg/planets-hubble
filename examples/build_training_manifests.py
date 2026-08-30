@@ -294,6 +294,9 @@ def build_real_manifest(
             file_size, sha256 = _hash_file(path)
             if file_size != size:
                 raise ManifestError(f"file changed while hashing: {relative}")
+            record_id = "real-" + hashlib.sha256(
+                f"{relative}:{sha256}".encode("utf-8")
+            ).hexdigest()[:24]
             target_value = _first_value(metadata, ("target", "target_id", "target_name"))
             target = None if target_value is None else str(target_value)
             lineage_value = _first_value(
@@ -315,7 +318,7 @@ def build_real_manifest(
                     else "real_observation_role_declared_without_truth_inference"
                 )
             record: dict[str, Any] = {
-                "record_id": f"real-{sha256[:16]}",
+                "record_id": record_id,
                 "source": "real_hubble",
                 "path": relative,
                 "size_bytes": file_size,
