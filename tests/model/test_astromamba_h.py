@@ -130,6 +130,7 @@ def test_forward_exposes_all_architecture_slices_and_dense_heatmaps():
     assert outputs["period_proposal"]["features"].shape == (1, 16)
 
     assert outputs["heatmaps"].shape == (1, 2, 2, 5, 6, 90, 160)
+    assert outputs["source_heatmaps"].shape == (1, 2, 2, 3, 5, 6, 90, 160)
     assert outputs["wavelength_availability"].shape == (1, 2, 2, 5)
     assert outputs["source_heatmap"].shape == (1, 2, 2, 90, 160)
     assert outputs["candidate_heatmap"].shape == (1, 2, 2, 90, 160)
@@ -142,7 +143,7 @@ def test_forward_exposes_all_architecture_slices_and_dense_heatmaps():
         "interpolation_mask",
     )
 
-    assert outputs["global_heads"]["candidate_probability"].shape == (1, 2)
+    assert outputs["global_heads"]["candidate_probability"].shape == (1,)
     assert outputs["orbit"]["period_posterior"].shape == (1, 7)
     assert outputs["orbit"]["constraint_statuses"] == (
         "well_constrained",

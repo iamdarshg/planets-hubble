@@ -395,7 +395,11 @@ class SourceTokenizer(nn.Module):
         """Anchor sources once and sample those same locations in every frame."""
 
         batch, visits, steps, channels, height, width = feature_map.shape
-        reference = feature_map[:, 0, 0]
+        flat_feature_map = feature_map.reshape(batch, visits * steps, channels, height, width)
+        flat_step_mask = step_mask.reshape(batch, visits * steps)
+        reference_indices = flat_step_mask.to(dtype=torch.long).argmax(dim=1)
+        batch_indices = torch.arange(batch, device=feature_map.device)
+        reference = flat_feature_map[batch_indices, reference_indices]
         reference_logits = self.source_score(reference).flatten(1)
         top_scores, anchor_indices = torch.topk(reference_logits, k=self.top_k, dim=1)
         if source_xy is not None:
@@ -891,12 +895,17 @@ class AstroMambaH(nn.Module):
         source_tokens = source_tokens + condition.unsqueeze(1) + wavelength_context.unsqueeze(1)
         source_tokens = source_tokens + object_context.unsqueeze(1)
         wavelength_weights = inputs.wavelength_mask.unsqueeze(-1).to(inputs.wavelength_tokens.dtype)
+        wavelength_present = inputs.wavelength_mask.any(dim=3)
+        frame_mask = step_mask.reshape(frame_count)
         source_photometry_values = inputs.wavelength_tokens[..., 1:3]
         source_photometry_values = (
             (source_photometry_values * wavelength_weights).sum(dim=3)
             / wavelength_weights.sum(dim=3).clamp_min(1.0)
         )
         source_photometry = self.source_photometry_projection(source_photometry_values)
+        source_photometry = source_photometry * (wavelength_present & step_mask).unsqueeze(-1).to(
+            source_photometry.dtype
+        )
         source_tokens = source_tokens + source_photometry.reshape(
             frame_count, 1, config.embedding_dim
         )
@@ -908,6 +917,7 @@ class AstroMambaH(nn.Module):
                 object_embeddings,
                 object_mask,
             )
+        source_tokens = source_tokens * frame_mask[:, None, None].to(source_tokens.dtype)
 
         source_tokens_by_frame = source_tokens.reshape(batch, visits, steps, config.source_top_k, -1)
         local_time = inputs.local_time
@@ -962,18 +972,27 @@ class AstroMambaH(nn.Module):
         constraint_logits = self.period_proposal["constraint"](pooled_long)
 
         source_frame_event_logits = self.prediction_heads["event"](local_source_tokens).squeeze(-1)
-        source_frame_event_probability = source_frame_event_logits.sigmoid()
-        source_frame_event_probability = source_frame_event_probability * step_mask[:, :, :, None].to(
-            source_frame_event_probability.dtype
+        source_frame_event_logits = source_frame_event_logits * step_mask[:, :, :, None].to(
+            source_frame_event_logits.dtype
+        )
+        source_frame_event_probability = source_frame_event_logits.sigmoid() * step_mask[:, :, :, None].to(
+            source_frame_event_logits.dtype
         )
         source_event_logits = self.prediction_heads["source_event"](source_global_tokens).squeeze(-1)
         source_photometry_event_logits = self.source_photometry_event(
             source_photometry_values.reshape(frame_count, 2)
         ).reshape(batch, visits, steps, 1)
-        source_photometry_event_logits = source_photometry_event_logits.mean(dim=(1, 2))
-        source_event_logits = source_event_logits.clone()
-        source_event_logits[:, 0] = source_event_logits[:, 0] + source_photometry_event_logits[:, 0]
+        photometry_weights = (wavelength_present & step_mask).unsqueeze(-1).to(
+            source_photometry_event_logits.dtype
+        )
+        source_photometry_event_logits = (
+            (source_photometry_event_logits * photometry_weights).sum(dim=(1, 2))
+            / photometry_weights.sum(dim=(1, 2)).clamp_min(1.0)
+        )
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
+        visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
+            visit_source_event_logits.dtype
+        )
         source_visit_event_logits = visit_source_event_logits.permute(0, 2, 1)
         visit_event_logits = visit_source_event_logits.max(dim=2).values
         pooled_backbone_event_logits = self.prediction_heads["global_event"](pooled_long).squeeze(-1)
@@ -987,21 +1006,34 @@ class AstroMambaH(nn.Module):
 
         heatmaps = None
         if config.decode_heatmaps:
-            heatmaps = self._decode_heatmaps(
+            source_heatmaps = self._decode_heatmaps(
                 source_map,
-                local_event_tokens.reshape(frame_count, config.temporal_width),
+                local_source_tokens.reshape(frame_count, config.source_top_k, config.temporal_width),
                 raster,
                 availability,
             )
-            heatmaps = heatmaps.reshape(
+            source_heatmaps = source_heatmaps.reshape(
                 batch,
                 visits,
                 steps,
+                config.source_top_k,
                 config.canonical_wavelength_bins,
                 config.heatmap_features,
                 *config.heatmap_size,
             )
-        source_heatmap = source_logits_map.sigmoid().reshape(batch, visits, steps, *config.heatmap_size)
+            source_heatmaps = source_heatmaps * step_mask[:, :, :, None, None, None, None, None].to(
+                source_heatmaps.dtype
+            )
+            heatmap_weights = source_frame_event_probability / source_frame_event_probability.sum(
+                dim=3, keepdim=True
+            ).clamp_min(1e-6)
+            heatmaps = (source_heatmaps * heatmap_weights[:, :, :, :, None, None, None, None]).sum(dim=3)
+        else:
+            source_heatmaps = None
+            heatmaps = None
+        source_logits_map = source_logits_map * step_mask[:, :, :, None, None].to(source_logits_map.dtype)
+        source_heatmap = source_logits_map.sigmoid() * step_mask[:, :, :, None, None].to(source_logits_map.dtype)
+        source_heatmap = source_heatmap.reshape(batch, visits, steps, *config.heatmap_size)
         source_event_heatmap = torch.zeros_like(source_heatmap).reshape(frame_count, -1)
         anchor_indices_flat = anchor_indices[:, None, None].expand(batch, visits, steps, -1).reshape(
             frame_count, config.source_top_k
@@ -1018,9 +1050,20 @@ class AstroMambaH(nn.Module):
             "coverage": self.prediction_heads["coverage"](visit_source_tokens.mean(dim=2)).squeeze(-1),
             "sufficiency": self.prediction_heads["sufficiency"](visit_source_tokens.mean(dim=2)).squeeze(-1),
         }
-        head_logits = {
+        visit_head_logits = {
+            name: logits * visit_mask.to(logits.dtype)
+            for name, logits in visit_head_logits.items()
+        }
+        global_head_logits = {
             "candidate": self.prediction_heads["candidate"](pooled_long).squeeze(-1),
             "event": global_event_logits,
+            "artifact": self.prediction_heads["artifact"](pooled_long).squeeze(-1),
+            "ood": self.prediction_heads["ood"](pooled_long).squeeze(-1),
+            "coverage": self.prediction_heads["coverage"](pooled_long).squeeze(-1),
+            "sufficiency": self.prediction_heads["sufficiency"](pooled_long).squeeze(-1),
+        }
+        head_logits = {
+            **global_head_logits,
             "visit_event": visit_event_logits,
             "source_event": source_event_logits,
             "frame_event": frame_event_logits,
@@ -1059,7 +1102,7 @@ class AstroMambaH(nn.Module):
             / source_event_weight_sum
         )
         global_heads = {
-            output_name: visit_head_logits[name].sigmoid()
+            output_name: global_head_logits[name].sigmoid()
             for name, output_name in global_head_names.items()
         }
         global_heads["event_evidence_score"] = global_heads["event_probability"]
@@ -1095,6 +1138,7 @@ class AstroMambaH(nn.Module):
             "source_long_time_tokens": source_long_time_tokens,
             "source_event_logits": source_event_logits,
             "source_photometry_event_logits": source_photometry_event_logits,
+            "visit_head_logits": visit_head_logits,
             "source_pool_weights": source_pool_weights,
             "visit_event_logits": visit_event_logits,
             "frame_event_logits": frame_event_logits,
@@ -1110,6 +1154,7 @@ class AstroMambaH(nn.Module):
                 "features_by_source": period_features_by_source,
             },
             "heatmaps": heatmaps,
+            "source_heatmaps": source_heatmaps,
             "heatmap_feature_names": HEATMAP_FEATURE_NAMES,
             "source_heatmap": source_heatmap,
             "candidate_heatmap": candidate_heatmap,
@@ -1130,6 +1175,9 @@ class AstroMambaH(nn.Module):
             "diagnostics": {
                 "source_scores": source_scores.reshape(batch, visits, steps, config.source_top_k),
                 "source_frame_event_logits": source_frame_event_logits,
+                "source_photometry": source_photometry.reshape(
+                    batch, visits, steps, config.embedding_dim
+                ),
                 "measured_wavelength_mask": inputs.wavelength_mask,
                 "object_mask": inputs.object_mask,
                 "frame_event_probability": frame_event_probability,
@@ -1154,16 +1202,30 @@ class AstroMambaH(nn.Module):
         temporal_factor = self.spatial_temporal_decoder["temporal_factor"](frame_embedding)
         temporal_factor = temporal_factor.reshape(
             frame_embedding.shape[0],
+            frame_embedding.shape[1],
             config.canonical_wavelength_bins,
             config.heatmap_features,
             config.heatmap_rank,
         )
-        heatmaps = torch.einsum("nrhw,nbfr->nbfhw", spatial_factor, temporal_factor)
+        heatmaps = torch.einsum("nrhw,nkbfr->nkbfhw", spatial_factor, temporal_factor)
 
         validity = F.interpolate(raster[:, 3:4], size=config.heatmap_size, mode="area").clamp(0.0, 1.0)
         interpolation = F.interpolate(raster[:, 4:5], size=config.heatmap_size, mode="area").clamp(0.0, 1.0)
-        heatmaps[:, :, 2] = heatmaps[:, :, 2] + spatial_factor.mean(dim=1).unsqueeze(1)
-        heatmaps[:, :, 3] = heatmaps[:, :, 3].abs()
-        heatmaps[:, :, 4] = validity * availability[:, :, None, None]
-        heatmaps[:, :, 5] = interpolation * availability[:, :, None, None]
-        return heatmaps
+        source_presence = heatmaps[:, :, :, 2] + spatial_factor.mean(dim=1)[:, None, None]
+        uncertainty = heatmaps[:, :, :, 3].abs()
+        valid = (validity[:, None, None] * availability[:, None, :, None, None, None]).expand(
+            -1, frame_embedding.shape[1], -1, -1, -1, -1
+        )
+        interpolated = (
+            interpolation[:, None, None] * availability[:, None, :, None, None, None]
+        ).expand(-1, frame_embedding.shape[1], -1, -1, -1, -1)
+        return torch.cat(
+            (
+                heatmaps[:, :, :, :2],
+                source_presence.unsqueeze(3),
+                uncertainty.unsqueeze(3),
+                valid,
+                interpolated,
+            ),
+            dim=3,
+        )

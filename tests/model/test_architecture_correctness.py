@@ -1,6 +1,11 @@
 import torch
 
-from model.astromamba_h import AstroMambaH, AstroMambaHInputs, combine_source_conditioned_event_logits
+from model.astromamba_h import (
+    AstroMambaH,
+    AstroMambaHInputs,
+    SourceTokenizer,
+    combine_source_conditioned_event_logits,
+)
 from model.astromamba_h import AstroMambaHConfig
 
 
@@ -106,3 +111,83 @@ def test_global_event_logit_uses_source_conditioned_evidence() -> None:
 
     assert result.shape == (1,)
     assert result.item() < 0.0
+
+
+def test_persistent_anchors_choose_a_valid_reference_frame() -> None:
+    config = AstroMambaHConfig(
+        stage_channels=(2, 2, 2, 2),
+        embedding_dim=2,
+        temporal_width=2,
+        source_top_k=1,
+        context_token_count=1,
+        fusion_blocks=1,
+        fusion_heads=1,
+        temporal_blocks=1,
+        canonical_wavelength_bins=2,
+        wavelength_fourier_features=1,
+        period_bin_count=2,
+        heatmap_rank=1,
+        decode_heatmaps=False,
+    )
+    tokenizer = SourceTokenizer(1, config)
+    with torch.no_grad():
+        tokenizer.source_score.weight.zero_()
+        tokenizer.source_score.weight[0, 0, 0, 0] = 1.0
+        tokenizer.source_score.bias.zero_()
+    feature_map = torch.zeros(1, 1, 2, 1, 2, 2)
+    feature_map[0, 0, 0, 0, 0, 0] = 10.0
+    feature_map[0, 0, 1, 0, 1, 1] = 5.0
+    step_mask = torch.tensor([[[False, True]]])
+
+    _, _, _, _, anchor_indices = tokenizer.persistent_forward(feature_map, step_mask)
+
+    assert anchor_indices.item() == 3
+
+
+def test_masked_frames_are_inert_after_multimodal_fusion() -> None:
+    config = tiny_config()
+    model = AstroMambaH(config).eval()
+    inputs = make_inputs(config, visits=1, steps=2)
+    inputs.step_mask = torch.tensor([[[True, False]]])
+    with torch.no_grad():
+        outputs = model(inputs)
+
+    assert torch.allclose(outputs["source_tokens"][:, :, 1], torch.zeros_like(outputs["source_tokens"][:, :, 1]))
+    assert torch.allclose(outputs["frame_event_logits"][:, :, 1], torch.zeros_like(outputs["frame_event_logits"][:, :, 1]))
+    assert torch.allclose(outputs["source_heatmap"][:, :, 1], torch.zeros_like(outputs["source_heatmap"][:, :, 1]))
+
+
+def test_dense_heatmaps_retain_source_conditioning() -> None:
+    config = AstroMambaHConfig(
+        **{**tiny_config().__dict__, "decode_heatmaps": True}
+    )
+    model = AstroMambaH(config).eval()
+    with torch.no_grad():
+        outputs = model(make_inputs(config, visits=1, steps=1))
+
+    assert outputs["source_heatmaps"].shape == (1, 1, 1, config.source_top_k, 5, 6, 90, 160)
+
+
+def test_global_and_visit_event_outputs_keep_distinct_logit_levels() -> None:
+    config = tiny_config()
+    with torch.no_grad():
+        outputs = AstroMambaH(config)(make_inputs(config, visits=2, steps=1))
+
+    assert outputs["head_logits"]["event"].shape == (1,)
+    assert outputs["visit_head_logits"]["event"].shape == (1, 2)
+    assert outputs["global_heads"]["event_probability"].shape == (1,)
+    assert torch.allclose(
+        outputs["global_heads"]["event_probability"],
+        outputs["global_event_logits"].sigmoid(),
+    )
+
+
+def test_empty_wavelength_modality_has_no_photometry_branch_contribution() -> None:
+    config = tiny_config()
+    inputs = make_inputs(config, visits=1, steps=1)
+    inputs.wavelength_mask.zero_()
+    with torch.no_grad():
+        outputs = AstroMambaH(config)(inputs)
+
+    assert torch.allclose(outputs["diagnostics"]["source_photometry"], torch.zeros(1, 1, 1, 16))
+    assert torch.allclose(outputs["source_photometry_event_logits"], torch.zeros(1, 1))
