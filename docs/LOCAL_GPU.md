@@ -156,6 +156,13 @@ The current full research smoke (82,541,531 parameters) measured finite loss,
 The procedural synthetic pretraining job was also observed mid-run at
 approximately 0.61 GiB process RSS with 3.85 GiB CUDA in use and an actively
 growing SSD cache; it stays under the 1.6 GiB cap.
+
+Training under the 1.6 GiB cap uses the decoder-off configuration
+(`decode_heatmaps=False`, 69,547,155 active parameters, ~1.36 GB peak CUDA).
+The full 82,541,531-parameter configuration includes the 13M-parameter dense
+decoder, whose workspace grows across in-process steps; it is the
+construction/inference preset and requires a larger host-RAM budget for
+training on this machine.
 The v7 paired real-parent workers were measured under the previous 1.8 GiB
 cap, with a maximum of 1,892,282,368 bytes (historical). Current storage
 accounting is 806,928,292 bytes under

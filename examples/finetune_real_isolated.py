@@ -43,6 +43,12 @@ def main() -> int:
         help="train global event and source-proposal heatmap objectives together",
     )
     parser.add_argument(
+        "--skip-dense-heatmaps",
+        action="store_true",
+        help="pass --skip-dense-heatmaps to each worker so the fine-tune "
+        "architecture matches decoder-off synthetic checkpoints.",
+    )
+    parser.add_argument(
         "--paired",
         action="store_true",
         help="use one shared positive/null optimizer step per iteration",
@@ -92,6 +98,8 @@ def main() -> int:
             ]
             if args.source_event_curriculum:
                 worker_args.append("--source-event-curriculum")
+            if args.skip_dense_heatmaps:
+                worker_args.append("--skip-dense-heatmaps")
             if args.sequence_summary:
                 worker_args.append("--sequence-summary")
             completed = subprocess.run(

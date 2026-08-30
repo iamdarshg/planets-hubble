@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+from dataclasses import replace
 import json
 import sys
 from contextlib import nullcontext
@@ -56,6 +57,13 @@ def main() -> int:
         action="store_true",
         help="allow a smaller synthetic warm-up only for a bounded smoke test",
     )
+    parser.add_argument(
+        "--decode-heatmaps",
+        action="store_true",
+        help="enable the dense wavelength heatmap decoder during training. "
+        "The default keeps training cap-safe under the 1.6 GiB host-RSS cap; "
+        "the decoder accounts for roughly 13M of the 82.5M parameters.",
+    )
     parser.add_argument("--real-steps", type=int, default=16)
     parser.add_argument("--target-loss", type=float, default=0.05)
     parser.add_argument("--target-patience", type=int, default=3)
@@ -64,8 +72,11 @@ def main() -> int:
 
     device = resolve_device(args.device)
     construction_context = torch.device(device) if device.type == "cuda" else nullcontext()
+    model_config = research_config()
+    if not args.decode_heatmaps:
+        model_config = replace(model_config, decode_heatmaps=False)
     with construction_context:
-        model = AstroMambaHTrainingAdapter(config=research_config())
+        model = AstroMambaHTrainingAdapter(config=model_config)
     result = train_synthetic_then_real(
         model=model,
         synthetic_config=SyntheticConfig(
@@ -87,6 +98,7 @@ def main() -> int:
         target_patience=args.target_patience,
         output_dir=args.output_dir,
     )
+    result["model_parameter_count"] = sum(parameter.numel() for parameter in model.parameters())
     print(json.dumps(_jsonable(result), sort_keys=True))
     return 0
 

@@ -114,6 +114,14 @@ admits real-parent fine-tuning. This is a training-order guard, not a claim
 that 4,096 examples are scientifically sufficient. Use an explicit lower
 warm-up only for bounded tests or debugging.
 
+Under the 1.6 GiB host-RSS cap the research model trains with the dense
+wavelength heatmap decoder disabled (`decode_heatmaps=False`, approximately
+69.5M active parameters). The full 82,541,531-parameter construction includes
+the decoder and is used for inference; on this Windows/CUDA build the decoder
+adds roughly 13M parameters and its workspace growth prevents in-process
+training under the host-RAM cap. Pass `--decode-heatmaps` to the training
+entry point only when a larger host-RAM budget is available.
+
 For a bounded two-phase run, use `training.train_synthetic_then_real`:
 synthetic pretraining runs first, then real-parent injection/fine-tuning is run
 only when real parents are supplied, and held-out parent evaluation is

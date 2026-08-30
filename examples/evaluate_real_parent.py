@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+from dataclasses import replace
 import json
 import sys
 from contextlib import nullcontext
@@ -36,10 +37,20 @@ def main() -> int:
         action="store_true",
         help="reduce the complete parent sequence to the cap-safe temporal summary",
     )
+    parser.add_argument(
+        "--decode-heatmaps",
+        action="store_true",
+        help="construct the full 82.5M model with the dense decoder enabled. "
+        "Training checkpoints default to decoder-off (~69.5M active), so this "
+        "flag must match the checkpoint's training configuration.",
+    )
     args = parser.parse_args()
     device = resolve_device(args.device)
+    model_config = research_config()
+    if not args.decode_heatmaps:
+        model_config = replace(model_config, decode_heatmaps=False)
     with (torch.device(device) if device.type == "cuda" else nullcontext()):
-        model = AstroMambaHTrainingAdapter(config=research_config())
+        model = AstroMambaHTrainingAdapter(config=model_config)
     model = model.to(device, dtype=torch.bfloat16 if device.type == "cuda" else torch.float32)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)
