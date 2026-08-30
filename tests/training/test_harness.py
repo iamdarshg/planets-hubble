@@ -1,6 +1,7 @@
 import pytest
 import torch
 from torch import nn
+from pathlib import Path
 
 from training import (
     BoundedTrainer,
@@ -245,3 +246,57 @@ def test_gradient_coverage_guard_can_require_every_trainable_parameter():
 
     with pytest.raises(RuntimeError, match="gradient coverage"):
         trainer.train_epoch([make_tiny_adapter_batch(batch_size=1)])
+
+
+def test_resource_cap_defaults_follow_environment_overrides(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = (
+        "import sys; sys.path.insert(0, r'" + str(src).replace("'", "\\'") + "')\n"
+        "from training import harness\n"
+        "print(harness.DEFAULT_RSS_CAP_BYTES, harness.DEFAULT_STORAGE_CAP_BYTES)\n"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(src),
+        "PLANETS_HUBBLE_RSS_CAP_BYTES": "12345",
+        "PLANETS_HUBBLE_STORAGE_CAP_BYTES": "67890",
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "12345 67890"
+
+
+def test_invalid_resource_cap_environment_value_fails_import(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    src = Path(__file__).resolve().parents[2] / "src"
+    code = (
+        "import sys; sys.path.insert(0, r'" + str(src).replace("'", "\\'") + "')\n"
+        "from training import harness\n"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(src),
+        "PLANETS_HUBBLE_RSS_CAP_BYTES": "not-an-int",
+    }
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert completed.returncode != 0
+    assert "must be an integer" in completed.stderr

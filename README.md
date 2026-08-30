@@ -114,6 +114,22 @@ admits real-parent fine-tuning. This is a training-order guard, not a claim
 that 4,096 examples are scientifically sufficient. Use an explicit lower
 warm-up only for bounded tests or debugging.
 
+## Google Colab (free T4)
+
+A single monolithic notebook runs the full lifecycle on a free Colab GPU
+runtime (procedural synthetic pretraining, real-parent fine-tuning, held-out
+evaluation) and returns checkpoints, logs, and the run report to a daemon on
+this machine through a free cloudflared tunnel.  No Google Drive is used.
+
+    https://colab.research.google.com/github/iamdarshg/planets-hubble/blob/main/colab/planets_hubble_colab.ipynb
+
+Start the local receiver first:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools/start_colab_receiver.ps1
+
+See docs/COLAB.md for the flow, resource caps, security boundary, and resume
+instructions.
+
 Under the 1.6 GiB host-RSS cap the research model trains with the dense
 wavelength heatmap decoder disabled (`decode_heatmaps=False`, approximately
 69.5M active parameters). The full 82,541,531-parameter construction includes

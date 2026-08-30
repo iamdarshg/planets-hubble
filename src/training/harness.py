@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from typing import Any, Callable, Iterable, Literal, Mapping, Optional
 
 import torch
@@ -16,8 +17,34 @@ LossFunction = Callable[[Any, Any], Tensor]
 # The local CUDA runtime needs more host memory than the original 720 MiB
 # budget. Keep the cap explicit in bytes while using the user's revised 1.6 GB
 # limit as 1.6 GiB for consistency with the previous MiB-based setting.
-DEFAULT_RSS_CAP_BYTES = int(1.6 * 1024 * 1024 * 1024)
-DEFAULT_STORAGE_CAP_BYTES = 5 * 1024 * 1024 * 1024
+def _cap_bytes_from_env(name: str, default: int) -> int:
+    """Resolve a byte-count resource cap from an optional environment override.
+
+    The local default remains the user's 1.6 GiB host-RSS and 5 GiB storage
+    boundary.  The environment variables PLANETS_HUBBLE_RSS_CAP_BYTES and
+    PLANETS_HUBBLE_STORAGE_CAP_BYTES let a different host (for example a
+    Colab VM with 12 GiB RAM) widen the bound without editing code.  Invalid
+    values fail loudly at import time.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer byte count, got {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be positive, got {value}")
+    return value
+
+
+DEFAULT_RSS_CAP_BYTES = _cap_bytes_from_env(
+    "PLANETS_HUBBLE_RSS_CAP_BYTES", int(1.6 * 1024 * 1024 * 1024)
+)
+DEFAULT_STORAGE_CAP_BYTES = _cap_bytes_from_env(
+    "PLANETS_HUBBLE_STORAGE_CAP_BYTES", 5 * 1024 * 1024 * 1024
+)
 
 
 class NonFiniteTrainingError(RuntimeError):
