@@ -25,13 +25,10 @@ gradient reachability, not decoder output):
 
 ```text
 python -m pytest -q
-67 passed in 11.07s
+69 passed in 14.77s
 ```
 
-```text
-pytest -q
-67 passed in 11.07s
-```
+`python -m compileall -q src examples tests` also completed successfully.
 
 The real AstroMamba-H CUDA smoke path uses a bounded one-batch, one-visit,
 one-local-step input with the full 720x1280 raster contract. It performs a
@@ -88,31 +85,34 @@ that the research-size model can consume a real synthetic full-resolution
 bundle and update its parameters on the local GPU under the available VRAM and
 the revised 1.8 GiB host-RSS cap.
 
-The bounded isolated-worker probes completed multiple synthetic curricula and
-then 8 real-parent views (4 exposures, null/injected counterfactuals). The
-latest direct-source-photometry curriculum completed 26 synthetic views before
-the bounded run was stopped; on the fixed seed-23 diagnostic it produced
-null/injected mean event probabilities of 0.075858/0.999981. This is strong
-separation on the synthetic counterfactual, but it is not grokking or
-convergence evidence because the run was intentionally short and the synthetic
-distribution is not real Hubble data.
+The bounded isolated-worker probes completed multiple synthetic curricula. The
+latest varied-seed direct-source-photometry runs remained finite and
+cap-compliant, but the fixed eight-seed diagnostic reached only 13/16 correct
+at the 0.5 threshold. Pairwise injected-vs-null ranking was 8/8, so the model
+has learned useful counterfactual ordering, but its absolute synthetic score
+calibration is not yet reliable. This is not grokking or convergence evidence.
 
-The expanded real-parent pass covered downloaded exposure records from seven
+The v7 real-parent pass covered downloaded exposure records from seven
 non-holdout HST target manifests (HD 189733, WASP-12, WASP-39, WASP-43,
 HAT-P-11, GJ 1214, and prepared HD 209458), using synchronized positive/null
-workers. A normalization bug was found and fixed during this pass: MAST
+workers for 4 steps per target. A normalization bug was found and fixed during
+this pass: MAST
 ``observation_start``/``observation_end`` can describe a broad visit window,
 while ``exposure_duration_seconds`` describes the actual integration. The
 parent contract now preserves both values and uses the explicit physical
-duration for detector and model inputs. The v6 sweep remained finite; its
-largest newly recorded worker RSS was 1,891,028,992 bytes and peak CUDA
-allocation was 1,563,218,944 bytes. The v6 checkpoint was evaluated on the
-separate two-sample held-out HD 209458 manifest and returned:
+duration for detector and model inputs. The v7 sweep remained finite; the
+largest newly recorded worker RSS was 1,892,282,368 bytes and peak CUDA
+allocation was 1,563,218,944 bytes. The v7 checkpoint was evaluated on the
+separate two-sample held-out HD 209458 manifest. The first evaluation exposed
+a source-conditioning bug: the pooled patch head overrode negative
+source-specific evidence. The final event logit now keeps the persistent source
+anchor as the primary evidence and bounds the pooled patch contribution. The
+same held-out pair then returned:
 
 ```text
 accuracy:               1.0 (2/2)
-event probabilities:    0.8840392828, 0.2068940550
-mean probability:       0.5454666689
+event probabilities:    0.8244618773, 0.0179862101
+mean probability:       0.4212240437
 ```
 
 This is a successful bounded transfer smoke on a two-sample holdout, not a
@@ -128,10 +128,11 @@ are a gate, not a claim that an unmeasured future run is compliant:
 
 ```text
 measured research RSS: 1,842,831,360 bytes for the full research smoke
-measured isolated-step RSS: 1,849,352,192 bytes for a fresh worker
+measured isolated-step RSS: 1,892,282,368 bytes for the largest v7 worker
 RSS cap:                1.80 GiB
 resource violation:     none in the recorded smoke/isolated-step runs
-storage written:        0 bytes
+stored artifacts plus real data: 899,189,524 bytes
+storage cap:             5 GiB
 ```
 
 The prior CPU-to-CUDA construction path reached approximately 1.88 GiB and
@@ -141,12 +142,11 @@ on CUDA, avoiding that migration overhead. The current smoke reports
 
 The latest full research smoke measured 50,187,735 parameters, finite loss,
 1,701,552,128 bytes peak CUDA allocation, and 1,842,831,360 bytes process RSS.
-A fresh isolated optimizer step measured 1,474,002,432 bytes peak CUDA
-allocation and 1,849,352,192 bytes RSS. The isolated synthetic and
-real-parent workers also stayed below the cap; their largest recorded RSS
-values were 1,928,249,344 and 1,911,619,584 bytes respectively in the
-latest coordinate-aware BF16 synthetic and real-parent runs. The v6 sweep's
-fresh paired workers were lower still, at a maximum of 1,891,028,992 bytes.
+The v7 paired real-parent workers also stayed below the cap, with a maximum of
+1,892,282,368 bytes. Current storage accounting is 806,928,292 bytes under
+`artifacts/` and 92,261,232 bytes under `data/`, for 899,189,524 bytes total.
+Checkpoint snapshots are overwritten or removed after each bounded step; the
+old redundant checkpoint pile is not retained.
 
 The harness continues to report the measured RSS and any violations rather
 than assuming compliance. The cap is runtime- and process-specific; future
@@ -182,15 +182,14 @@ Because two full-resolution counterfactual batches do not fit simultaneously
 under the host cap, `finetune_real_isolated.py --paired` launches synchronized
 positive and null workers from the same checkpoint and averages their model
 updates on CPU. This approximates one paired optimizer step without a label
-ordering bias while keeping each GPU worker below the cap. The six-step HD
-209458 diagnostic run measured worker RSS between 1,885,118,464 and
-1,891,532,800 bytes and peak CUDA allocation of 1,561,726,464 bytes. It did
-not produce meaningful holdout separation: the corrected FP32 probabilities
-were `0.700895` for the injected view and `0.700075` for the null view, or
-0.50 accuracy at the 0.5 threshold.
+ordering bias while keeping each GPU worker below the cap. The source-aware
+event combination is covered by an architecture regression test and was
+rechecked against the v7 holdout pair after the real sweep.
 
 The current evidence is therefore an executable, cap-compliant data/model
-path, a corrected counterfactual generator, strong short-run synthetic
-separation, and a positive two-sample unseen-real smoke. It is still not
-evidence of a confirmed exoplanet, convergence, grokking, calibrated
-probabilities, or accurate orbital parameters.
+path, a corrected counterfactual generator, useful but not-yet-grokking
+synthetic ranking, and a positive two-sample unseen-real counterfactual smoke.
+It is still not evidence of a confirmed exoplanet, convergence, grokking,
+calibrated probabilities, or accurate orbital parameters. The held-out test is
+an injected/null pair on an unseen real parent, not an independent discovery
+claim.

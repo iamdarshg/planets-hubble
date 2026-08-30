@@ -36,6 +36,41 @@ ORBIT_CONSTRAINT_STATUSES = (
 )
 
 
+def combine_source_conditioned_event_logits(
+    pooled_backbone_logits: Tensor,
+    source_event_logits: Tensor,
+    source_photometry_event_logits: Tensor,
+    *,
+    backbone_weight: float = 0.5,
+    photometry_weight: float = 0.5,
+) -> Tensor:
+    """Combine patch and anchor evidence without losing source identity.
+
+    The pooled backbone is useful for discovery, but it can be driven by an
+    unrelated bright or unstable source in the patch.  The known/persistent
+    source anchor therefore supplies the primary event evidence.  Keeping a
+    bounded backbone contribution preserves a discovery-mode gradient while
+    preventing a contradictory patch-level false positive from overriding the
+    source-conditioned signal.
+    """
+
+    if pooled_backbone_logits.ndim != 1:
+        raise ValueError("pooled_backbone_logits must have shape [batch]")
+    if source_event_logits.ndim != 2 or source_event_logits.shape[0] != pooled_backbone_logits.shape[0]:
+        raise ValueError("source_event_logits must have shape [batch, source]")
+    if source_photometry_event_logits.ndim != 2:
+        raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
+    if source_photometry_event_logits.shape != (pooled_backbone_logits.shape[0], 1):
+        raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
+    if not 0.0 <= backbone_weight <= 1.0 or not 0.0 <= photometry_weight <= 1.0:
+        raise ValueError("evidence weights must be in [0, 1]")
+    return (
+        source_event_logits[:, 0]
+        + backbone_weight * pooled_backbone_logits
+        + photometry_weight * source_photometry_event_logits[:, 0]
+    )
+
+
 @dataclass(frozen=True)
 class AstroMambaHConfig:
     """Shape and capacity contract for the scaffold.
@@ -920,9 +955,11 @@ class AstroMambaH(nn.Module):
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         source_visit_event_logits = visit_source_event_logits.permute(0, 2, 1)
         visit_event_logits = visit_source_event_logits.max(dim=2).values
-        global_event_logits = (
-            self.prediction_heads["global_event"](pooled_long).squeeze(-1)
-            + source_photometry_event_logits[:, 0]
+        pooled_backbone_event_logits = self.prediction_heads["global_event"](pooled_long).squeeze(-1)
+        global_event_logits = combine_source_conditioned_event_logits(
+            pooled_backbone_event_logits,
+            source_event_logits,
+            source_photometry_event_logits,
         )
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
@@ -1041,6 +1078,7 @@ class AstroMambaH(nn.Module):
             "visit_event_logits": visit_event_logits,
             "frame_event_logits": frame_event_logits,
             "global_event_logits": global_event_logits,
+            "pooled_backbone_event_logits": pooled_backbone_event_logits,
             "head_logits": head_logits,
             "missing_modality_flags": missing_modality_flags,
             "period_proposal": {

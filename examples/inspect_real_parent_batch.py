@@ -51,6 +51,9 @@ def main() -> int:
                     "head_event_logit": float(output["head_logits"]["event"].float().reshape(-1)[0].item()),
                     "visit_event_logit": float(output["visit_event_logits"].float().reshape(-1)[0].item()),
                     "source_event_logit": float(output["source_event_logits"].float().reshape(-1)[0].item()),
+                    "source_photometry_event_logit": float(
+                        output["source_photometry_event_logits"].float().reshape(-1)[0].item()
+                    ),
                     "source_anchor_xy": output["source_anchor_xy"].float().reshape(-1, 2)[0].cpu().tolist(),
                     "source_logit_max": float(output["source_logits"].float().max().cpu()),
                     "source_logit_argmax": int(output["source_logits"].float().reshape(-1).argmax().cpu()),

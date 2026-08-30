@@ -1,6 +1,6 @@
 import torch
 
-from model.astromamba_h import AstroMambaH, AstroMambaHInputs
+from model.astromamba_h import AstroMambaH, AstroMambaHInputs, combine_source_conditioned_event_logits
 from model.astromamba_h import AstroMambaHConfig
 
 
@@ -82,3 +82,18 @@ def test_empty_modalities_have_zero_contribution_not_attention_bias() -> None:
     inputs.object_mask.zero_()
     outputs = AstroMambaH(config)(inputs)
     assert torch.allclose(outputs["missing_modality_flags"], torch.ones(1, 2))
+
+
+def test_global_event_logit_uses_source_conditioned_evidence() -> None:
+    pooled_backbone = torch.tensor([4.0])
+    source_event = torch.tensor([[-4.0, -5.0]])
+    source_photometry = torch.tensor([[-1.0]])
+
+    result = combine_source_conditioned_event_logits(
+        pooled_backbone,
+        source_event,
+        source_photometry,
+    )
+
+    assert result.shape == (1,)
+    assert result.item() < 0.0
