@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import inspect
+import json
 import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -343,6 +344,21 @@ def _train_phase(
         for batch in step_batches:
             report = trainer.train_epoch([batch], loss_fn=default_loss_fn)
             reports.append(report)
+            print(
+                json.dumps(
+                    {
+                        "phase": phase,
+                        "step": step,
+                        "samples_seen": trainer.state.samples_seen,
+                        "optimizer_steps": trainer.state.optimizer_steps,
+                        "loss": report.last_loss,
+                        "rss_within_cap": report.rss_within_cap,
+                        "peak_gpu_mb": round((report.peak_gpu_memory_bytes or 0) / 1e6, 1),
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
             if report.last_loss is not None and report.last_loss <= target_loss:
                 consecutive += 1
                 if (
