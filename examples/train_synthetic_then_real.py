@@ -49,6 +49,12 @@ def main() -> int:
         "use a larger learning rate (e.g. 1e-2) so updates stay representable",
     )
     parser.add_argument(
+        "--cudnn-off",
+        action="store_true",
+        help="disable cuDNN to cut the first-step CUDA module footprint "
+        "in host memory (small training slowdown, ~200 MB RSS saving)",
+    )
+    parser.add_argument(
         "--resume-from",
         type=Path,
         default=None,
@@ -84,6 +90,11 @@ def main() -> int:
     parser.add_argument("--target-patience", type=int, default=3)
     parser.add_argument("--output-dir", type=Path, default=None)
     args = parser.parse_args()
+    if args.cudnn_off:
+        import torch.backends.cudnn as cudnn_backend
+
+        cudnn_backend.enabled = False
+        cudnn_backend.benchmark = False
 
     device = resolve_device(args.device)
     construction_context = torch.device(device) if device.type == "cuda" else nullcontext()

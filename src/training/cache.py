@@ -96,10 +96,10 @@ class ProceduralSyntheticCache:
             return None
         path = self._cache_dir / entry.filename
         try:
-            with np.load(path, allow_pickle=False) as archive:
+            with np.load(path, allow_pickle=False, mmap_mode="r") as archive:
                 metadata = json.loads(str(archive["__metadata__"].item()))
                 arrays = {
-                    name: np.array(archive[name], copy=True)
+                    name: archive[name]
                     for name in archive.files
                     if name != "__metadata__"
                 }

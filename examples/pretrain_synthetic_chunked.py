@@ -40,6 +40,12 @@ def main() -> int:
         help="pass --bf16-weights and --learning-rate 1e-2 to each chunk "
         "process to keep WorkingSet under the 1.6 GiB cap",
     )
+    parser.add_argument(
+        "--cudnn-off",
+        action="store_true",
+        help="pass --cudnn-off to each chunk process to reduce first-step "
+        "CUDA module host memory",
+    )
     args = parser.parse_args()
     if args.total_steps < 1 or args.chunk_steps < 1:
         raise ValueError("total-steps and chunk-steps must be positive")
@@ -80,6 +86,8 @@ def main() -> int:
             command.append("--bounded-smoke-test")
         if args.bf16_weights:
             command += ["--bf16-weights", "--learning-rate", "1e-2"]
+        if args.cudnn_off:
+            command.append("--cudnn-off")
         attempt = 0
         completed = None
         while True:
