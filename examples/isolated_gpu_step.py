@@ -37,6 +37,7 @@ from training import (  # noqa: E402
     source_event_loss_fn,
     iter_paired_synthetic_training_batches,
     iter_parented_synthetic_training_batches,
+    resolve_device,
 )
 from training.pipeline import _split_batch  # noqa: E402
 
@@ -45,6 +46,42 @@ def prepare_worker_batch(batch, device):
     """Stage the only active batch before training and release CPU storage."""
 
     return batch.to(device)
+
+
+def resolve_worker_device(requested: str):
+    return resolve_device(requested)
+
+
+def save_checkpoint_atomically(checkpoint: Path, payload: dict) -> None:
+    temporary = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, checkpoint)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def worker_report_payload(report, *, seed: int, view: int, checkpoint_bytes: int) -> dict:
+    storage_bytes = report.storage_bytes_written + checkpoint_bytes
+    storage_within_cap = storage_bytes <= report.storage_cap_bytes
+    violations = list(report.resource_cap_violations)
+    if not storage_within_cap and "storage" not in violations:
+        violations.append("storage")
+    return {
+        "seed": seed,
+        "view": view,
+        "label": ("null", "injected")[view],
+        "loss": report.last_loss,
+        "finite": report.loss_is_finite,
+        "process_rss_bytes": report.process_rss_bytes,
+        "rss_cap_bytes": report.rss_cap_bytes,
+        "rss_within_cap": report.rss_within_cap,
+        "peak_gpu_memory_bytes": report.peak_gpu_memory_bytes,
+        "storage_bytes_written": storage_bytes,
+        "storage_cap_bytes": report.storage_cap_bytes,
+        "storage_within_cap": storage_within_cap,
+        "resource_cap_violations": violations,
+    }
 
 
 def main() -> int:
@@ -64,6 +101,7 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--event-only", action="store_true")
     parser.add_argument("--source-event-curriculum", action="store_true")
+    parser.add_argument("--device", default="auto")
     parser.add_argument("--visits", type=int, default=1)
     parser.add_argument("--local-steps", type=int, default=1)
     parser.add_argument(
@@ -83,7 +121,7 @@ def main() -> int:
         raise ValueError("learning-rate must be positive")
     if args.visits < 1 or args.local_steps < 1:
         raise ValueError("visits and local-steps must be positive")
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = resolve_worker_device(args.device)
     config = research_config()
     if args.skip_dense_heatmaps:
         config = replace(config, decode_heatmaps=False)
@@ -118,6 +156,7 @@ def main() -> int:
         # The selected view is a tensor slice, so retain only that view before
         # staging it on CUDA. Keeping the full paired batch here duplicates the
         # multi-step raster in host memory and can breach the RSS cap.
+        batch = prepare_worker_batch(batch, device)
         del pair
     else:
         if args.manifest is None:
@@ -139,7 +178,7 @@ def main() -> int:
         batch = _cast_batch_floating_tensors(batch, torch.bfloat16)
         del parent_stream, parent
         gc.collect()
-    batch = prepare_worker_batch(batch, device)
+        batch = prepare_worker_batch(batch, device)
     gc.collect()
     trainer = BoundedTrainer(
         model,
@@ -160,27 +199,25 @@ def main() -> int:
     )
     report = trainer.train_epoch([batch], loss_fn=loss_fn)
     args.checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.checkpoint.with_suffix(args.checkpoint.suffix + ".tmp")
-    torch.save(
+    save_checkpoint_atomically(
+        args.checkpoint,
         {"model": model.state_dict(), "parameter_count": report.parameter_count},
-        temporary,
     )
-    os.replace(temporary, args.checkpoint)
-    print(
-        json.dumps(
-            {
-                "seed": args.seed,
-                "view": args.view,
-                "loss": report.last_loss,
-                "finite": report.loss_is_finite,
-                "process_rss_bytes": report.process_rss_bytes,
-                "rss_within_cap": report.rss_within_cap,
-                "peak_gpu_memory_bytes": report.peak_gpu_memory_bytes,
-            },
-            sort_keys=True,
-        )
+    checkpoint_bytes = args.checkpoint.stat().st_size
+    payload = worker_report_payload(
+        report,
+        seed=args.seed,
+        view=args.view,
+        checkpoint_bytes=checkpoint_bytes,
     )
-    return 0 if report.rss_within_cap is not False and report.loss_is_finite else 2
+    del batch
+    gc.collect()
+    print(json.dumps(payload, sort_keys=True))
+    return 0 if (
+        report.rss_within_cap is not False
+        and report.loss_is_finite
+        and payload["storage_within_cap"]
+    ) else 2
 
 
 def load_parent(manifest_path: Path, *, exposure_index: int | None = None):
