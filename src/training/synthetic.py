@@ -20,6 +20,7 @@ def iter_synthetic_training_batches(
     *,
     sample_count: int,
     device: torch.device | str = "cpu",
+    source_top_k: int = 96,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Generate one model-ready synthetic sample at a time.
 
@@ -36,6 +37,8 @@ def iter_synthetic_training_batches(
         raise ValueError("sample_count must be a non-negative integer")
     if (config.raster_height, config.raster_width) != (720, 1280):
         raise ValueError("synthetic training batches require a 720x1280 raster config")
+    if source_top_k < 1:
+        raise ValueError("source_top_k must be positive")
 
     target_device = torch.device(device)
     for sample_index in range(sample_count):
@@ -74,6 +77,9 @@ def iter_synthetic_training_batches(
             "source": torch.from_numpy(
                 _source_target_map(config.visits, config.local_steps, config.source_x, config.source_y)
             )[None].to(target_device),
+            "source_event": torch.from_numpy(
+                _source_event_target(bool(view.labels.latent_positive), source_top_k)
+            )[None].to(target_device),
         }
         yield AstroMambaHTrainingBatch(
             inputs=inputs, target=target, auxiliary_targets=auxiliary_targets
@@ -85,6 +91,7 @@ def iter_paired_synthetic_training_batches(
     *,
     sample_count: int,
     device: torch.device | str = "cpu",
+    source_top_k: int = 96,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Yield null and injected counterfactual views from one shared scene.
 
@@ -96,6 +103,8 @@ def iter_paired_synthetic_training_batches(
         raise ValueError("sample_count must be a non-negative integer")
     if (config.raster_height, config.raster_width) != (720, 1280):
         raise ValueError("synthetic training batches require a 720x1280 raster config")
+    if source_top_k < 1:
+        raise ValueError("source_top_k must be positive")
     target_device = torch.device(device)
     for sample_index in range(sample_count):
         sample_config = replace(config, seed=config.seed + sample_index)
@@ -151,6 +160,14 @@ def iter_paired_synthetic_training_batches(
                         ]
                     )
                 ).to(target_device),
+                "source_event": torch.from_numpy(
+                    np.stack(
+                        [
+                            _source_event_target(bool(view.labels.latent_positive), source_top_k)
+                            for view in views
+                        ]
+                    )
+                ).to(target_device),
             },
         )
 
@@ -162,6 +179,7 @@ def iter_parented_synthetic_training_batches(
     device: torch.device | str = "cpu",
     start_index: int = 0,
     sequence_summary: bool = False,
+    source_top_k: int = 96,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Lazily inject events into real parents and convert one bundle at a time.
 
@@ -177,6 +195,8 @@ def iter_parented_synthetic_training_batches(
         raise ValueError("sample_count must be a non-negative integer")
     if not isinstance(start_index, int) or start_index < 0:
         raise ValueError("start_index must be a non-negative integer")
+    if source_top_k < 1:
+        raise ValueError("source_top_k must be positive")
     parent_list = tuple(parents)
     if sample_count and not parent_list:
         raise ValueError("at least one parent is required for a non-empty stream")
@@ -261,8 +281,12 @@ def iter_parented_synthetic_training_batches(
                 wavelength_tokens[0, visit_index, step_index, 0] = np.array(
                     [
                         np.log10(_filter_wavelength(exposure.filter_name)) / 4.0,
-                        float(np.clip(np.nanmean(residual) / scale, -20.0, 20.0)),
-                        float(np.clip(np.nanmean(uncertainty) / scale, 0.0, 20.0)),
+                        _source_aperture_residual(
+                            residual, scale, parent.source_x, parent.source_y
+                        ),
+                        _source_aperture_uncertainty(
+                            uncertainty, scale, parent.source_x, parent.source_y
+                        ),
                         1.0,
                         exposure.exposure_seconds,
                         1.0,
@@ -433,6 +457,12 @@ def iter_parented_synthetic_training_batches(
                 "source": torch.from_numpy(
                     _source_target_map(visits, steps, parent.source_x / 1280.0, parent.source_y / 720.0)[None]
                 ).to(target_device),
+                "source_event": torch.from_numpy(
+                    _source_event_target(
+                        bool(any(item.relative_flux_drop > 0.0 for item in selected)),
+                        source_top_k,
+                    )
+                )[None].to(target_device),
             },
         )
 
@@ -451,6 +481,35 @@ def _filter_wavelength(filter_name: str) -> float:
     }.get(filter_name, 600.0)
 
 
+def _source_window(
+    array: np.ndarray, source_x: float, source_y: float, radius: int = 5
+) -> np.ndarray:
+    """Return a bounded aperture around the known/catalogued source anchor."""
+
+    height, width = array.shape[-2:]
+    center_x = int(round(source_x))
+    center_y = int(round(source_y))
+    x0 = max(center_x - radius, 0)
+    x1 = min(center_x + radius + 1, width)
+    y0 = max(center_y - radius, 0)
+    y1 = min(center_y + radius + 1, height)
+    return array[y0:y1, x0:x1]
+
+
+def _source_aperture_residual(
+    residual: np.ndarray, scale: float, source_x: float, source_y: float
+) -> float:
+    value = float(np.nanmean(_source_window(residual, source_x, source_y)) / scale)
+    return float(np.clip(value, -20.0, 20.0))
+
+
+def _source_aperture_uncertainty(
+    uncertainty: np.ndarray, scale: float, source_x: float, source_y: float
+) -> float:
+    value = float(np.nanmean(_source_window(uncertainty, source_x, source_y)) / scale)
+    return float(np.clip(value, 0.0, 20.0))
+
+
 def _source_target_map(visits: int, steps: int, x: float, y: float) -> np.ndarray:
     """Create a small supervised source-proposal target on the /8 grid."""
     height, width = 90, 160
@@ -459,3 +518,11 @@ def _source_target_map(visits: int, steps: int, x: float, y: float) -> np.ndarra
     center_y = y * (height - 1)
     target = np.exp(-0.5 * (((xx - center_x) / 1.5) ** 2 + ((yy - center_y) / 1.5) ** 2))
     return np.broadcast_to(target.astype(np.float32), (visits, steps, height, width)).copy()
+
+
+def _source_event_target(positive: bool, source_count: int) -> np.ndarray:
+    """Label the known source anchor while keeping extra proposals negative."""
+
+    target = np.zeros(source_count, dtype=np.float32)
+    target[0] = float(positive)
+    return target

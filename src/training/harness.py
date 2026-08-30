@@ -294,6 +294,15 @@ def source_event_loss_fn(prediction: Any, batch: Any) -> Tensor:
             source_logits,
             source_target.to(device=source_logits.device, dtype=torch.float32).reshape_as(source_logits),
         )
+    source_event_target = getattr(batch, "auxiliary_targets", {}).get("source_event")
+    source_event_logits = prediction.get("source_event_logits")
+    if source_event_target is not None and isinstance(source_event_logits, Tensor):
+        loss = loss + 0.5 * F.binary_cross_entropy_with_logits(
+            source_event_logits,
+            source_event_target.to(
+                device=source_event_logits.device, dtype=torch.float32
+            ).reshape_as(source_event_logits),
+        )
     return loss
 
 

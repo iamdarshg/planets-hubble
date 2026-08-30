@@ -73,6 +73,8 @@ def test_parented_stream_emits_full_resolution_model_batches() -> None:
     assert batch.inputs.wavelength_tokens[0, 0, 0, 0, 4].item() == 12.5
     assert batch.target.item() == 1.0
     assert batch.auxiliary_targets["frame_event"].any()
+    assert batch.auxiliary_targets["source_event"].shape == (1, 96)
+    assert batch.auxiliary_targets["source_event"][0, 0].item() == 1.0
 
     summary = next(
         iter_parented_synthetic_training_batches(
@@ -113,6 +115,7 @@ def test_parented_stream_labels_null_counterfactual_as_negative() -> None:
     null_batch = next(batches)
     assert null_batch.target.item() == 0.0
     assert not null_batch.auxiliary_targets["frame_event"].any()
+    assert null_batch.auxiliary_targets["source_event"][0, 0].item() == 0.0
 
 
 def test_paired_stream_keeps_null_and_injected_counterfactuals_together() -> None:

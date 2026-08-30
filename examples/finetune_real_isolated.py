@@ -31,7 +31,12 @@ def main() -> int:
         action="store_true",
         help="reduce the complete parent sequence to a cap-safe temporal summary",
     )
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=1e-2,
+        help="BF16-compatible SGD learning rate; use a smaller value only with FP32 weights",
+    )
     parser.add_argument(
         "--source-event-curriculum",
         action="store_true",

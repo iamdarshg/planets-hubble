@@ -676,6 +676,12 @@ class AstroMambaH(nn.Module):
             nn.Linear(config.embedding_dim, config.embedding_dim),
         )
         self.fusion_projection = nn.Linear(config.embedding_dim, config.temporal_width)
+        self.source_photometry_projection = nn.Sequential(
+            nn.Linear(2, config.embedding_dim),
+            nn.GELU(),
+            nn.Linear(config.embedding_dim, config.embedding_dim),
+        )
+        self.source_photometry_event = nn.Linear(2, 1)
         self.cross_modal_fusion = nn.ModuleList(
             CrossModalBlock(config) for _ in range(config.fusion_blocks)
         )
@@ -750,6 +756,9 @@ class AstroMambaH(nn.Module):
             "spatial_backbone": nn.ModuleList([self.spatial_backbone, self.spatial_fpn]),
             "source_tokenizer": self.source_tokenizer,
             "wavelength_encoder": self.wavelength_encoder,
+            "source_photometry": nn.ModuleList(
+                [self.source_photometry_projection, self.source_photometry_event]
+            ),
             "object_context_encoder": self.object_context_encoder,
             "geometry_coverage_encoder": self.geometry_coverage_encoder,
             "cross_modal_fusion": self.cross_modal_fusion,
@@ -825,6 +834,16 @@ class AstroMambaH(nn.Module):
         source_tokens = source_tokens.reshape(frame_count, config.source_top_k, config.embedding_dim)
         source_tokens = source_tokens + condition.unsqueeze(1) + wavelength_context.unsqueeze(1)
         source_tokens = source_tokens + object_context.unsqueeze(1)
+        wavelength_weights = inputs.wavelength_mask.unsqueeze(-1).to(inputs.wavelength_tokens.dtype)
+        source_photometry_values = inputs.wavelength_tokens[..., 1:3]
+        source_photometry_values = (
+            (source_photometry_values * wavelength_weights).sum(dim=3)
+            / wavelength_weights.sum(dim=3).clamp_min(1.0)
+        )
+        source_photometry = self.source_photometry_projection(source_photometry_values)
+        source_tokens = source_tokens + source_photometry.reshape(
+            frame_count, 1, config.embedding_dim
+        )
         for block in self.cross_modal_fusion:
             source_tokens = block(
                 source_tokens,
@@ -892,10 +911,19 @@ class AstroMambaH(nn.Module):
             source_frame_event_probability.dtype
         )
         source_event_logits = self.prediction_heads["source_event"](source_global_tokens).squeeze(-1)
+        source_photometry_event_logits = self.source_photometry_event(
+            source_photometry_values.reshape(frame_count, 2)
+        ).reshape(batch, visits, steps, 1)
+        source_photometry_event_logits = source_photometry_event_logits.mean(dim=(1, 2))
+        source_event_logits = source_event_logits.clone()
+        source_event_logits[:, 0] = source_event_logits[:, 0] + source_photometry_event_logits[:, 0]
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         source_visit_event_logits = visit_source_event_logits.permute(0, 2, 1)
         visit_event_logits = visit_source_event_logits.max(dim=2).values
-        global_event_logits = self.prediction_heads["global_event"](pooled_long).squeeze(-1)
+        global_event_logits = (
+            self.prediction_heads["global_event"](pooled_long).squeeze(-1)
+            + source_photometry_event_logits[:, 0]
+        )
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
@@ -1007,8 +1035,9 @@ class AstroMambaH(nn.Module):
             "local_source_tokens": local_source_tokens,
             "long_time_tokens": long_time_tokens,
             "source_long_time_tokens": source_long_time_tokens,
-                "source_event_logits": source_event_logits,
-                "source_pool_weights": source_pool_weights,
+            "source_event_logits": source_event_logits,
+            "source_photometry_event_logits": source_photometry_event_logits,
+            "source_pool_weights": source_pool_weights,
             "visit_event_logits": visit_event_logits,
             "frame_event_logits": frame_event_logits,
             "global_event_logits": global_event_logits,

@@ -87,10 +87,7 @@ def main() -> int:
     model = model.to(device, dtype=torch.bfloat16)
     if args.checkpoint.exists():
         state = torch.load(args.checkpoint, map_location=device, weights_only=False)
-        model.load_state_dict(
-            state["model"] if "model" in state else state,
-            strict=not args.skip_dense_heatmaps,
-        )
+        model.load_state_dict(state["model"] if "model" in state else state, strict=False)
 
     if args.phase == "synthetic":
         pair = next(

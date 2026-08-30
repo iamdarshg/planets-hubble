@@ -32,6 +32,7 @@ def main() -> int:
     model.eval()
     parent = load_parent(args.manifest)
     rows = []
+    previous_raster = None
     with torch.inference_mode():
         for batch in iter_parented_synthetic_training_batches(
             (parent,), sample_count=2, device="cpu", sequence_summary=args.sequence_summary
@@ -50,8 +51,18 @@ def main() -> int:
                     "head_event_logit": float(output["head_logits"]["event"].float().reshape(-1)[0].item()),
                     "visit_event_logit": float(output["visit_event_logits"].float().reshape(-1)[0].item()),
                     "source_event_logit": float(output["source_event_logits"].float().reshape(-1)[0].item()),
+                    "source_anchor_xy": output["source_anchor_xy"].float().reshape(-1, 2)[0].cpu().tolist(),
+                    "source_logit_max": float(output["source_logits"].float().max().cpu()),
+                    "source_logit_argmax": int(output["source_logits"].float().reshape(-1).argmax().cpu()),
+                    "source_aperture_residual": float(batch.inputs.wavelength_tokens[..., 0, 1].float().mean().cpu()),
+                    "source_aperture_uncertainty": float(batch.inputs.wavelength_tokens[..., 0, 2].float().mean().cpu()),
                 }
             )
+            if previous_raster is not None:
+                delta = raster.float() - previous_raster
+                rows[-1]["raster_delta_max_abs"] = float(delta.abs().max())
+                rows[-1]["raster_delta_l1"] = float(delta.abs().sum())
+            previous_raster = raster.float().clone()
     print(json.dumps({"rows": rows}, sort_keys=True))
     return 0
 

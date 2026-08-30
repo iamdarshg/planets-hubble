@@ -90,31 +90,35 @@ the revised 1.8 GiB host-RSS cap.
 
 The bounded isolated-worker probes completed multiple synthetic curricula and
 then 8 real-parent views (4 exposures, null/injected counterfactuals). The
-latest coordinate-aware source+event curriculum completed 32 synthetic views;
-loss ranged approximately 0.57--1.49, with most later injected views below
-0.75. All updates were finite and cap-compliant, but this is still not
-grokking/convergence evidence because the loss is not stably below the target.
-The leakage-free real repeat was followed by evaluation on four unseen-parent
-exposure indices: each returned 1/2 correct (0.50 accuracy), with event
-probabilities near 0.36. This is a controlled integration result, not a claim
-of Hubble exoplanet sensitivity; the holdout contains only four parent
-exposures and synthetic counterfactual labels.
+latest direct-source-photometry curriculum completed 26 synthetic views before
+the bounded run was stopped; on the fixed seed-23 diagnostic it produced
+null/injected mean event probabilities of 0.075858/0.999981. This is strong
+separation on the synthetic counterfactual, but it is not grokking or
+convergence evidence because the run was intentionally short and the synthetic
+distribution is not real Hubble data.
 
-The expanded real-parent pass then covered 20 downloaded exposure records from
-six additional HST targets (HD 189733, WASP-12, WASP-39, WASP-43, HAT-P-11,
-and GJ 1214), producing 40 null/injected views. A normalization bug was found
-and fixed during this pass: MAST ``observation_start``/``observation_end`` can
-describe a broad visit window, while ``exposure_duration_seconds`` describes
-the actual integration. The parent contract now preserves both values and
-uses the explicit physical duration for detector and model inputs. After
-restarting from the clean synthetic checkpoint, all 40 updates were finite;
-the maximum recorded real-worker RSS was 1,911,873,536 bytes and peak CUDA
-allocation was 1,574,620,672 bytes. The final checkpoint was evaluated on the
-four held-out HD 209458 exposure indices and returned 0.50 accuracy (1/2 per
-index), with probabilities approximately 0.365--0.367. This confirms the
-repaired training/data path but does not establish learned real-data
-exoplanet sensitivity; the classifier has not yet reached grokking or a
-defensible detection threshold.
+The expanded real-parent pass covered downloaded exposure records from seven
+non-holdout HST target manifests (HD 189733, WASP-12, WASP-39, WASP-43,
+HAT-P-11, GJ 1214, and prepared HD 209458), using synchronized positive/null
+workers. A normalization bug was found and fixed during this pass: MAST
+``observation_start``/``observation_end`` can describe a broad visit window,
+while ``exposure_duration_seconds`` describes the actual integration. The
+parent contract now preserves both values and uses the explicit physical
+duration for detector and model inputs. The v6 sweep remained finite; its
+largest newly recorded worker RSS was 1,891,028,992 bytes and peak CUDA
+allocation was 1,563,218,944 bytes. The v6 checkpoint was evaluated on the
+separate two-sample held-out HD 209458 manifest and returned:
+
+```text
+accuracy:               1.0 (2/2)
+event probabilities:    0.8840392828, 0.2068940550
+mean probability:       0.5454666689
+```
+
+This is a successful bounded transfer smoke on a two-sample holdout, not a
+claim of Hubble exoplanet sensitivity, a calibrated probability, grokking, or
+accurate orbital parameters. The holdout is too small for a scientific
+performance estimate, and the current run used the sequence-summary fallback.
 
 ## Resource-cap result
 
@@ -141,7 +145,8 @@ A fresh isolated optimizer step measured 1,474,002,432 bytes peak CUDA
 allocation and 1,849,352,192 bytes RSS. The isolated synthetic and
 real-parent workers also stayed below the cap; their largest recorded RSS
 values were 1,928,249,344 and 1,911,619,584 bytes respectively in the
-latest coordinate-aware BF16 synthetic and real-parent runs.
+latest coordinate-aware BF16 synthetic and real-parent runs. The v6 sweep's
+fresh paired workers were lower still, at a maximum of 1,891,028,992 bytes.
 
 The harness continues to report the measured RSS and any violations rather
 than assuming compliance. The cap is runtime- and process-specific; future
@@ -185,5 +190,7 @@ were `0.700895` for the injected view and `0.700075` for the null view, or
 0.50 accuracy at the 0.5 threshold.
 
 The current evidence is therefore an executable, cap-compliant data/model
-path and a corrected counterfactual generator—not evidence of a detected
-exoplanet, convergence, grokking, or accurate orbital parameters.
+path, a corrected counterfactual generator, strong short-run synthetic
+separation, and a positive two-sample unseen-real smoke. It is still not
+evidence of a confirmed exoplanet, convergence, grokking, calibrated
+probabilities, or accurate orbital parameters.
