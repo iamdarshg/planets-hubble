@@ -28,6 +28,6 @@ def research_config() -> AstroMambaHConfig:
         heatmap_rank=8,
         period_bin_count=32,
         period_feature_dim=16,
-        decoder_width=768,
+        decoder_width=704,
         decoder_blocks=6,
     )
