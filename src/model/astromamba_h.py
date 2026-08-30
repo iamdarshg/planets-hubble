@@ -18,6 +18,7 @@ from typing import Dict, Optional, Tuple
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 HEATMAP_FEATURE_NAMES = (
@@ -114,6 +115,10 @@ class AstroMambaHConfig:
     object_set_blocks: int = 2
     decoder_width: int = 512
     decoder_blocks: int = 3
+    # Number of raster frames retained in one spatial activation graph.
+    # Values smaller than the flattened frame count use activation
+    # checkpointing without changing source-token or temporal dimensions.
+    spatial_chunk_size: int = 1
     # Dense wavelength heatmaps are required for inference, but are optional
     # during memory-constrained sequence training when the structured heads
     # are the active objective.
@@ -166,6 +171,7 @@ class AstroMambaHConfig:
             self.object_set_blocks,
             self.decoder_width,
             self.decoder_blocks,
+            self.spatial_chunk_size,
         ) < 1:
             raise ValueError("Mamba dimensions must be positive")
 
@@ -810,6 +816,12 @@ class AstroMambaH(nn.Module):
             for name, module in components.items()
         }
 
+    def _spatial_features(self, raster: Tensor) -> Tensor:
+        """Extract an /8 FPN map for one raster chunk."""
+
+        _, stage1, stage2, stage3, stage4 = self.spatial_backbone(raster)
+        return self.spatial_fpn(stage1, stage2, stage3, stage4)
+
     def forward(self, inputs: AstroMambaHInputs) -> Dict[str, object]:
         inputs.validate(self.config)
         config = self.config
@@ -825,8 +837,17 @@ class AstroMambaH(nn.Module):
         step_mask = step_mask & visit_mask.unsqueeze(-1)
 
         raster = inputs.raster.reshape(frame_count, config.raster_channels, *config.input_size)
-        _, stage1, stage2, stage3, stage4 = self.spatial_backbone(raster)
-        source_map = self.spatial_fpn(stage1, stage2, stage3, stage4)
+        chunk_size = min(self.config.spatial_chunk_size, frame_count)
+        source_map_chunks = []
+        for start in range(0, frame_count, chunk_size):
+            raster_chunk = raster[start:start + chunk_size]
+            if self.training and torch.is_grad_enabled() and frame_count > chunk_size:
+                source_map_chunks.append(
+                    checkpoint(self._spatial_features, raster_chunk, use_reentrant=False)
+                )
+            else:
+                source_map_chunks.append(self._spatial_features(raster_chunk))
+        source_map = torch.cat(source_map_chunks, dim=0)
         source_map_sequence = source_map.reshape(
             batch, visits, steps, source_map.shape[1], source_map.shape[2], source_map.shape[3]
         )

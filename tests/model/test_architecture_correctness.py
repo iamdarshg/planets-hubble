@@ -75,6 +75,15 @@ def test_deep_spatial_stages_reach_the_loss() -> None:
     assert model.spatial_backbone.stage4.block[0].weight.grad is not None
 
 
+def test_spatial_chunking_supports_temporal_inputs() -> None:
+    config = tiny_config()
+    config = AstroMambaHConfig(**{**config.__dict__, "spatial_chunk_size": 1})
+    model = AstroMambaH(config)
+    outputs = model(make_inputs(config, visits=1, steps=2))
+
+    assert outputs["local_source_tokens"].shape[2] == 2
+
+
 def test_empty_modalities_have_zero_contribution_not_attention_bias() -> None:
     config = tiny_config()
     inputs = make_inputs(config, visits=1, steps=1)

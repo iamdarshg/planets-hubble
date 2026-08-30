@@ -41,6 +41,12 @@ from training import (  # noqa: E402
 from training.pipeline import _split_batch  # noqa: E402
 
 
+def prepare_worker_batch(batch, device):
+    """Stage the only active batch before training and release CPU storage."""
+
+    return batch.to(device)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -58,6 +64,8 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--event-only", action="store_true")
     parser.add_argument("--source-event-curriculum", action="store_true")
+    parser.add_argument("--visits", type=int, default=1)
+    parser.add_argument("--local-steps", type=int, default=1)
     parser.add_argument(
         "--skip-dense-heatmaps",
         action="store_true",
@@ -73,6 +81,8 @@ def main() -> int:
         raise ValueError("event-only and source-event-curriculum are mutually exclusive")
     if args.learning_rate <= 0.0:
         raise ValueError("learning-rate must be positive")
+    if args.visits < 1 or args.local_steps < 1:
+        raise ValueError("visits and local-steps must be positive")
     device = torch.device("cuda", torch.cuda.current_device())
     config = research_config()
     if args.skip_dense_heatmaps:
@@ -94,8 +104,8 @@ def main() -> int:
             iter_paired_synthetic_training_batches(
                 SyntheticConfig(
                     seed=args.seed,
-                    visits=1,
-                    local_steps=1,
+                    visits=args.visits,
+                    local_steps=args.local_steps,
                     raster_height=720,
                     raster_width=1280,
                     wavelength_nm=(450.0, 650.0, 1000.0),
@@ -105,6 +115,10 @@ def main() -> int:
             )
         )
         batch = _split_batch(pair)[args.view]
+        # The selected view is a tensor slice, so retain only that view before
+        # staging it on CUDA. Keeping the full paired batch here duplicates the
+        # multi-step raster in host memory and can breach the RSS cap.
+        del pair
     else:
         if args.manifest is None:
             raise ValueError("--manifest is required for the real phase")
@@ -125,6 +139,8 @@ def main() -> int:
         batch = _cast_batch_floating_tensors(batch, torch.bfloat16)
         del parent_stream, parent
         gc.collect()
+    batch = prepare_worker_batch(batch, device)
+    gc.collect()
     trainer = BoundedTrainer(
         model,
         config=TrainingConfig(
