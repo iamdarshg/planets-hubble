@@ -4,7 +4,8 @@ The Windows/CUDA build used for this project accumulates GPU workspace state
 across repeated in-process research-model steps and eventually stalls.  This
 driver runs the two-phase entry point in short chunks, each in a fresh process,
 resuming from the previous checkpoint via --resume-from and advancing the
-procedural sample counter with --synthetic-start-index.
+procedural sample counter with --synthetic-start-index.  Chunks that are killed
+by the resource watchdog are retried (bounded) after a settle delay.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -30,11 +32,15 @@ def main() -> int:
         action="store_true",
         help="allow chunks with fewer than the production warm-up (debug only)",
     )
+    parser.add_argument("--max-chunk-retries", type=int, default=3)
+    parser.add_argument("--settle-seconds", type=int, default=20)
     args = parser.parse_args()
     if args.total_steps < 1 or args.chunk_steps < 1:
         raise ValueError("total-steps and chunk-steps must be positive")
     if args.start_index < 0:
         raise ValueError("start-index must be non-negative")
+    if args.max_chunk_retries < 1 or args.settle_seconds < 0:
+        raise ValueError("retries must be positive and settle-seconds non-negative")
 
     entry = Path(__file__).resolve().with_name("train_synthetic_then_real.py")
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -66,21 +72,38 @@ def main() -> int:
             command += ["--resume-from", str(checkpoint)]
         if args.bounded_smoke_test:
             command.append("--bounded-smoke-test")
-        completed = subprocess.run(command, check=False)
-        record = {
-            "chunk_start": chunk_start,
-            "chunk_steps": chunk_count,
-            "exit_code": completed.returncode,
-            "checkpoint_exists": checkpoint.is_file(),
-            "checkpoint_size": checkpoint.stat().st_size if checkpoint.is_file() else None,
-        }
-        history.append(record)
-        with progress.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, sort_keys=True) + "\n")
-        if completed.returncode != 0:
-            print(json.dumps({"error": "chunk failed", **record}, sort_keys=True))
-            return completed.returncode
+        attempt = 0
+        completed = None
+        while True:
+            attempt += 1
+            completed = subprocess.run(command, check=False)
+            record = {
+                "chunk_start": chunk_start,
+                "chunk_steps": chunk_count,
+                "attempt": attempt,
+                "exit_code": completed.returncode,
+                "checkpoint_exists": checkpoint.is_file(),
+                "checkpoint_size": checkpoint.stat().st_size if checkpoint.is_file() else None,
+            }
+            history.append(record)
+            with progress.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, sort_keys=True) + "\n")
+            if completed.returncode == 0:
+                break
+            if attempt >= args.max_chunk_retries:
+                print(json.dumps({"error": "chunk failed after retries", **record}, sort_keys=True))
+                return completed.returncode
+            print(
+                json.dumps(
+                    {"retry": True, "chunk_start": chunk_start, "attempt": attempt},
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            time.sleep(args.settle_seconds)
         chunk_start += chunk_count
+        if chunk_start < args.total_steps:
+            time.sleep(args.settle_seconds)
     print(
         json.dumps(
             {
