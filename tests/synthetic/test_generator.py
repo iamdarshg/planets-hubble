@@ -37,6 +37,8 @@ def test_same_seed_reproduces_entire_paired_bundle() -> None:
     np.testing.assert_array_equal(first.labels.event_mask, second.labels.event_mask)
     assert first.labels.event_type == "transit"
     assert first.labels.injection_seed == 17
+    assert first.source_metadata["realism_tier"] == "R0-R3"
+    assert first.source_metadata["parent_conditioned"] is False
 
 
 def test_exposure_integrated_transit_has_expected_depth_and_timing() -> None:

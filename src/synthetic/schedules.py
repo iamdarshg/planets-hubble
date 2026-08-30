@@ -23,6 +23,7 @@ class ObservationSchedule:
     starts: np.ndarray
     mids: np.ndarray
     ends: np.ndarray
+    exposure_duration_seconds: np.ndarray
     exposure_ids: tuple[str, ...]
     visit_ids: tuple[str, ...]
     metadata: dict[str, Any]
@@ -39,6 +40,7 @@ class ObservationScheduleSampler:
         starts = _readonly([exposure.t_start_bjd_tdb for exposure in exposures])
         mids = _readonly([exposure.t_mid_bjd_tdb for exposure in exposures])
         ends = _readonly([exposure.t_end_bjd_tdb for exposure in exposures])
+        durations = _readonly([exposure.exposure_seconds for exposure in exposures])
         # Preserve the actual gap after each exposure.  In particular, do not
         # derive this from a difference of differences: that loses the only
         # gap for a two-exposure parent and misaligns longer parents.
@@ -47,6 +49,7 @@ class ObservationScheduleSampler:
             starts=starts,
             mids=mids,
             ends=ends,
+            exposure_duration_seconds=durations,
             exposure_ids=tuple(exposure.exposure_id for exposure in exposures),
             visit_ids=tuple(exposure.visit_id for exposure in exposures),
             metadata={
@@ -69,10 +72,12 @@ class ObservationScheduleSampler:
         starts = _readonly([exposure.t_start_bjd_tdb for exposure in selected])
         mids = _readonly([exposure.t_mid_bjd_tdb for exposure in selected])
         ends = _readonly([exposure.t_end_bjd_tdb for exposure in selected])
+        durations = _readonly([exposure.exposure_seconds for exposure in selected])
         return ObservationSchedule(
             starts=starts,
             mids=mids,
             ends=ends,
+            exposure_duration_seconds=durations,
             exposure_ids=tuple(exposure.exposure_id for exposure in selected),
             visit_ids=tuple(exposure.visit_id for exposure in selected),
             metadata={

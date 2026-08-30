@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from dataclasses import replace
 
 from synthetic.parents import RealExposureParent, RealObservationParent
 from synthetic.schedules import ObservationScheduleSampler
@@ -66,6 +67,18 @@ def test_schedule_replay_preserves_gaps_without_timestamp_jitter() -> None:
     )
     assert schedule.metadata["mode"] == "real_parent_replay"
     assert schedule.metadata["gap_days"] > 1.0
+
+
+def test_schedule_replay_preserves_physical_exposure_duration_and_read_only_arrays() -> None:
+    first = replace(make_parent().exposures[0], exposure_duration_seconds=12.5)
+    parent = replace(make_parent(), exposures=(first, make_parent().exposures[1]))
+
+    schedule = ObservationScheduleSampler(parent).sample()
+
+    np.testing.assert_array_equal(schedule.exposure_duration_seconds, [12.5, parent.exposures[1].exposure_seconds])
+    assert not schedule.exposure_duration_seconds.flags.writeable
+    with pytest.raises(ValueError):
+        schedule.exposure_duration_seconds[0] = 1.0
 
 
 def test_block_bootstrap_selects_whole_visits_and_is_reproducible() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 
 import numpy as np
@@ -18,6 +18,7 @@ class InjectedExposure:
     uncertainty: np.ndarray
     dq: np.ndarray
     relative_flux_drop: float
+    metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -56,14 +57,8 @@ class RealParentInjector:
         exposures = parent.exposures
         if any(exposure.science is None or exposure.uncertainty is None or exposure.dq is None for exposure in exposures):
             raise ValueError("all parent exposures need science, uncertainty, and dq arrays")
-        start = min(exposure.t_start_bjd_tdb for exposure in exposures)
-        end = max(exposure.t_end_bjd_tdb for exposure in exposures)
-        first_k = math.ceil((start - epoch_bjd_tdb) / period_days - 0.5)
-        last_k = math.floor((end - epoch_bjd_tdb) / period_days + 0.5)
-        transit_times = tuple(
-            epoch_bjd_tdb + index * period_days
-            for index in range(first_k, last_k + 1)
-            if start <= epoch_bjd_tdb + index * period_days <= end
+        transit_times = self._transit_times_for_exposures(
+            exposures, epoch_bjd_tdb, period_days, duration_days
         )
 
         null: list[InjectedExposure] = []
@@ -72,8 +67,24 @@ class RealParentInjector:
             science = np.asarray(exposure.science, dtype=np.float32)
             uncertainty = np.asarray(exposure.uncertainty, dtype=np.float32).copy()
             dq = np.asarray(exposure.dq, dtype=np.uint16).copy()
-            drop = self._box_transit_drop(exposure.t_mid_bjd_tdb, transit_times, period_days, duration_days, depth)
-            null.append(InjectedExposure(exposure.exposure_id, science.copy(), uncertainty.copy(), dq.copy(), 0.0))
+            metadata = self._exposure_metadata(exposure)
+            drop = self._integrated_box_transit_drop(
+                exposure,
+                transit_times,
+                period_days,
+                duration_days,
+                depth,
+            )
+            null.append(
+                InjectedExposure(
+                    exposure.exposure_id,
+                    science.copy(),
+                    uncertainty.copy(),
+                    dq.copy(),
+                    0.0,
+                    metadata.copy(),
+                )
+            )
             if drop == 0.0:
                 injected_science = science.copy()
             else:
@@ -99,7 +110,16 @@ class RealParentInjector:
                 # artificial positive ``injected - null`` signal and make a
                 # detector-background shortcut easier than the transit.
                 injected_science = (science - loss).astype(np.float32)
-            injected.append(InjectedExposure(exposure.exposure_id, injected_science, uncertainty, dq, drop))
+            injected.append(
+                InjectedExposure(
+                    exposure.exposure_id,
+                    injected_science,
+                    uncertainty,
+                    dq,
+                    drop,
+                    metadata,
+                )
+            )
         return ParentInjectionResult(
             null=tuple(null),
             injected=tuple(injected),
@@ -109,6 +129,7 @@ class RealParentInjector:
                 "parent_observation_id": parent.observation_id,
                 "target_id": parent.target_id,
                 "cadence_source": parent.provenance.get("source", "unknown"),
+                **self._parent_context(parent),
             },
         )
 
@@ -116,6 +137,7 @@ class RealParentInjector:
         self, parent: RealObservationParent, *, event_type: str = "null"
     ) -> ParentInjectionResult:
         """Return a paired null example without changing the real parent."""
+        self._require_parent_arrays(parent)
         null = tuple(
             InjectedExposure(
                 exposure.exposure_id,
@@ -123,13 +145,21 @@ class RealParentInjector:
                 np.asarray(exposure.uncertainty, dtype=np.float32).copy(),
                 np.asarray(exposure.dq, dtype=np.uint16).copy(),
                 0.0,
+                self._exposure_metadata(exposure),
             )
             for exposure in parent.exposures
         )
         return ParentInjectionResult(
             null=null,
             injected=tuple(
-                InjectedExposure(item.exposure_id, item.science.copy(), item.uncertainty.copy(), item.dq.copy(), 0.0)
+                InjectedExposure(
+                    item.exposure_id,
+                    item.science.copy(),
+                    item.uncertainty.copy(),
+                    item.dq.copy(),
+                    0.0,
+                    item.metadata.copy(),
+                )
                 for item in null
             ),
             transit_times_bjd_tdb=(),
@@ -139,8 +169,101 @@ class RealParentInjector:
                 "target_id": parent.target_id,
                 "event_type": event_type,
                 "cadence_source": parent.provenance.get("source", "unknown"),
+                "realism_tier": "R4",
+                "r5_status": "external_only",
+                **self._parent_context(parent),
             },
         )
+
+    @staticmethod
+    def _require_parent_arrays(parent: RealObservationParent) -> None:
+        if any(
+            exposure.science is None
+            or exposure.uncertainty is None
+            or exposure.dq is None
+            for exposure in parent.exposures
+        ):
+            raise ValueError("all parent exposures need science, uncertainty, and dq arrays")
+
+    @staticmethod
+    def _exposure_metadata(exposure: object) -> dict[str, object]:
+        return {
+            "instrument": exposure.instrument,
+            "detector": exposure.detector,
+            "filter_name": exposure.filter_name,
+            "visit_id": exposure.visit_id,
+            "t_start_bjd_tdb": exposure.t_start_bjd_tdb,
+            "t_mid_bjd_tdb": exposure.t_mid_bjd_tdb,
+            "t_end_bjd_tdb": exposure.t_end_bjd_tdb,
+            "exposure_duration_seconds": exposure.exposure_seconds,
+            "wcs": exposure.wcs,
+            "pointing": dict(exposure.pointing),
+            "observer_position": exposure.observer_position,
+            "observer_velocity": exposure.observer_velocity,
+            "focus": exposure.focus,
+            "has_previous_exposure_fluence": exposure.previous_exposure_fluence is not None,
+            "previous_exposure_time_bjd_tdb": exposure.previous_exposure_time_bjd_tdb,
+            "provenance": dict(exposure.provenance),
+            "realism_tier": "R4",
+        }
+
+    @staticmethod
+    def _parent_context(parent: RealObservationParent) -> dict[str, object]:
+        return {
+            "realism_tier": "R4",
+            "r5_status": "external_only",
+            "source_context": {
+                "target_id": parent.target_id,
+                "source_xy": (parent.source_x, parent.source_y),
+                "object_count": 0 if parent.object_tokens is None else int(parent.object_tokens.shape[0]),
+            },
+            "object_context": tuple(dict(item) for item in parent.object_metadata),
+        }
+
+    @classmethod
+    def _transit_times_for_exposures(
+        cls,
+        exposures: tuple[object, ...],
+        epoch_bjd_tdb: float,
+        period_days: float,
+        duration_days: float,
+    ) -> tuple[float, ...]:
+        times: set[float] = set()
+        for exposure in exposures:
+            half_exposure = exposure.exposure_seconds / 172800.0
+            start = exposure.t_mid_bjd_tdb - half_exposure - duration_days / 2.0
+            end = exposure.t_mid_bjd_tdb + half_exposure + duration_days / 2.0
+            first_k = math.ceil((start - epoch_bjd_tdb) / period_days)
+            last_k = math.floor((end - epoch_bjd_tdb) / period_days)
+            times.update(
+                epoch_bjd_tdb + index * period_days
+                for index in range(first_k, last_k + 1)
+            )
+        return tuple(sorted(times))
+
+    @classmethod
+    def _integrated_box_transit_drop(
+        cls,
+        exposure: object,
+        transit_times: tuple[float, ...],
+        period_days: float,
+        duration_days: float,
+        depth: float,
+    ) -> float:
+        if not transit_times:
+            return 0.0
+        nodes, weights = np.polynomial.legendre.leggauss(16)
+        half_exposure = exposure.exposure_seconds / 172800.0
+        sample_times = exposure.t_mid_bjd_tdb + half_exposure * nodes
+        phase_distance = np.min(
+            np.abs(
+                ((sample_times[:, None] - np.asarray(transit_times)[None, :]) + period_days / 2.0)
+                % period_days
+                - period_days / 2.0
+            ),
+            axis=1,
+        )
+        return float(depth * np.sum((phase_distance <= duration_days / 2.0) * weights) / 2.0)
 
     @staticmethod
     def _box_transit_drop(

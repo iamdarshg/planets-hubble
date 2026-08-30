@@ -37,11 +37,29 @@ class DetectorHistory:
             raise ValueError("max_entries must be positive")
         self._entries: deque[_HistoryEntry] = deque(maxlen=max_entries)
 
+    @classmethod
+    def from_parent(cls, exposure: object, *, max_entries: int = 8) -> "DetectorHistory":
+        """Seed bounded detector memory from one loaded parent exposure."""
+        history = cls(max_entries=max_entries)
+        fluence = exposure.previous_exposure_fluence
+        if fluence is None:
+            return history
+        if exposure.previous_exposure_time_bjd_tdb is None:
+            raise ValueError("previous_exposure_time_bjd_tdb is required with previous fluence")
+        history.record(
+            fluence,
+            time_bjd_tdb=exposure.previous_exposure_time_bjd_tdb,
+        )
+        return history
+
     def record(self, fluence: np.ndarray, *, time_bjd_tdb: float, saturated: bool = False) -> None:
         array = np.asarray(fluence, dtype=np.float32)
         if array.ndim != 2 or not np.all(np.isfinite(array)) or np.any(array < 0.0):
             raise ValueError("fluence must be a finite, non-negative 2D array")
-        self._entries.append(_HistoryEntry(array.copy(), float(time_bjd_tdb), bool(saturated)))
+        timestamp = float(time_bjd_tdb)
+        if not np.isfinite(timestamp):
+            raise ValueError("time_bjd_tdb must be finite")
+        self._entries.append(_HistoryEntry(array.copy(), timestamp, bool(saturated)))
 
     def persistence(
         self,
@@ -77,7 +95,16 @@ class WFC3UVISSimulator:
         cte_trailing: float = 0.0,
         cosmic_ray_rate: float = 0.0,
     ) -> None:
-        if not 0.0 <= cte_trailing < 1.0 or not 0.0 <= cosmic_ray_rate <= 1.0:
+        if (
+            not np.isfinite(dark_electrons)
+            or not np.isfinite(read_noise_electrons)
+            or not np.isfinite(saturation_electrons)
+            or dark_electrons < 0.0
+            or read_noise_electrons < 0.0
+            or saturation_electrons <= 0.0
+            or not 0.0 <= cte_trailing < 1.0
+            or not 0.0 <= cosmic_ray_rate <= 1.0
+        ):
             raise ValueError("cte_trailing and cosmic_ray_rate must be in [0, 1)")
         self.dark_electrons = float(dark_electrons)
         self.read_noise_electrons = float(read_noise_electrons)
@@ -112,7 +139,13 @@ class WFC3UVISSimulator:
             signal=signal.astype(np.float32),
             uncertainty=uncertainty,
             dq=dq,
-            metadata={"instrument": "WFC3", "detector": "UVIS", "cte_spatial": True},
+            metadata={
+                "instrument": "WFC3",
+                "detector": "UVIS",
+                "tier": "R3",
+                "approximation": "spatial_cte_trailing",
+                "cte_spatial": True,
+            },
         )
 
 
@@ -133,7 +166,19 @@ class WFC3IRSimulator:
             b <= a for a, b in zip(read_times_seconds, read_times_seconds[1:])
         ):
             raise ValueError("read_times_seconds must contain at least two increasing times")
-        if any(value < 0.0 for value in (read_noise_electrons, nonlinearity_amplitude, persistence_amplitude, cosmic_ray_rate)):
+        if (
+            not np.isfinite(saturation_electrons)
+            or saturation_electrons <= 0.0
+            or any(
+                not np.isfinite(value) or value < 0.0
+                for value in (
+                    read_noise_electrons,
+                    nonlinearity_amplitude,
+                    persistence_amplitude,
+                    cosmic_ray_rate,
+                )
+            )
+        ):
             raise ValueError("detector parameters must be non-negative")
         if cosmic_ray_rate > 1.0:
             raise ValueError("cosmic_ray_rate must be in [0, 1]")
@@ -198,5 +243,14 @@ class WFC3IRSimulator:
             uncertainty=uncertainty,
             dq=dq,
             read_stack=stack,
-            metadata={"instrument": "WFC3", "detector": "IR", "readout_mode": "MULTIACCUM"},
+            metadata={
+                "instrument": "WFC3",
+                "detector": "IR",
+                "tier": "R3",
+                "approximation": "MULTIACCUM_ramp_fit",
+                "readout_mode": "MULTIACCUM",
+                "persistence_source": "detector_history"
+                if history is not None and self.persistence_amplitude > 0.0
+                else "none",
+            },
         )

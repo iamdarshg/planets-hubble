@@ -7,12 +7,14 @@ from dataclasses import dataclass, replace
 from .injection import ParentInjectionResult, RealParentInjector
 from .parents import RealObservationParent
 from .population import ObservationProgram, PopulationDraw, PopulationSampler
+from .schedules import ObservationSchedule, ObservationScheduleSampler
 
 
 @dataclass(frozen=True)
 class HubbleSyntheticV2Result:
     population: PopulationDraw
     injection: ParentInjectionResult
+    schedule: ObservationSchedule
 
 
 class HubbleSyntheticV2:
@@ -33,6 +35,7 @@ class HubbleSyntheticV2:
         sample_index: int = 0,
         event_type: str | None = None,
     ) -> HubbleSyntheticV2Result:
+        schedule = ObservationScheduleSampler(parent).sample()
         draw = self.population_sampler.draw(sample_index=sample_index, event_type=event_type)
         # The real parent owns the observing mode.  Never let a synthetic
         # population draw silently change an HST UVIS parent into an IR or
@@ -63,4 +66,4 @@ class HubbleSyntheticV2:
                 depth=min(0.95, draw.planet.radius_ratio**2),
                 duration_days=draw.planet.transit_duration_days,
             )
-        return HubbleSyntheticV2Result(population=draw, injection=injection)
+        return HubbleSyntheticV2Result(population=draw, injection=injection, schedule=schedule)

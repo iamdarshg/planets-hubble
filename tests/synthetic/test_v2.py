@@ -32,3 +32,6 @@ def test_v2_uses_population_draw_and_parent_cadence() -> None:
     assert result.injection.metadata["mode"] == "real_parent_injection"
     assert result.injection.null[0].exposure_id == "e1"
     assert result.injection.injected[0].science.shape == (5, 5)
+    np.testing.assert_allclose(result.schedule.mids, [10.005])
+    np.testing.assert_allclose(result.schedule.exposure_duration_seconds, [864.0])
+    assert result.injection.metadata["realism_tier"] == "R4"

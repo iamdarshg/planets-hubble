@@ -125,6 +125,8 @@ class SyntheticGenerator:
             "normalization": "robust_baseline_reference_1.0",
             "provenance": "analytic_synthetic_generator",
             "parent_observation": None,
+            "realism_tier": "R0-R3",
+            "parent_conditioned": False,
             "nuisance_labels_explicit": True,
             "time_system": "BJD_TDB",
         }
