@@ -20,10 +20,23 @@ from .harness import (
     DEFAULT_STORAGE_CAP_BYTES,
     amp_supported,
     default_loss_fn,
+    event_only_loss_fn,
+    source_event_loss_fn,
     process_rss_bytes,
     resolve_device,
 )
-from .synthetic import iter_parented_synthetic_training_batches, iter_synthetic_training_batches
+from .synthetic import (
+    iter_paired_synthetic_training_batches,
+    iter_parented_synthetic_training_batches,
+    iter_synthetic_training_batches,
+)
+from .pipeline import (
+    EvaluationReport,
+    PhaseReport,
+    evaluate_parent_injections,
+    evaluate_unlabeled,
+    train_synthetic_then_real,
+)
 
 __all__ = [
     "BoundedTrainer",
@@ -40,8 +53,16 @@ __all__ = [
     "TrainingState",
     "amp_supported",
     "default_loss_fn",
+    "event_only_loss_fn",
+    "source_event_loss_fn",
     "iter_synthetic_training_batches",
     "iter_parented_synthetic_training_batches",
+    "iter_paired_synthetic_training_batches",
+    "EvaluationReport",
+    "PhaseReport",
+    "evaluate_parent_injections",
+    "evaluate_unlabeled",
+    "train_synthetic_then_real",
     "make_tiny_adapter_batch",
     "make_tiny_astromamba_batch",
     "process_rss_bytes",

@@ -8,3 +8,7 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Local FITS/NPZ products and bounded training checkpoints are not source.
+data/real/
+artifacts/

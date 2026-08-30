@@ -6,12 +6,12 @@ from .astromamba_h import AstroMambaHConfig
 
 
 def research_config() -> AstroMambaHConfig:
-    """Return the measured 70--90M-parameter research configuration.
+    """Return the V2 50--65M-parameter research configuration.
 
     The default :class:`AstroMambaHConfig` remains intentionally small for
-    CPU tests and development.  This preset preserves the same input/output
-    contract while increasing spatial, fusion, and temporal capacity for the
-    intended local-GPU training experiments.
+    CPU tests and development. This preset preserves the same input/output
+    contract while allocating capacity to source persistence, modality-set
+    reasoning, multiscale decoding, and bounded temporal stages.
     """
 
     return AstroMambaHConfig(
@@ -20,12 +20,14 @@ def research_config() -> AstroMambaHConfig:
         temporal_width=512,
         source_top_k=96,
         context_token_count=32,
-        fusion_blocks=12,
+        fusion_blocks=3,
         fusion_heads=8,
-        temporal_blocks=24,
+        temporal_blocks=8,
         canonical_wavelength_bins=16,
         wavelength_fourier_features=4,
         heatmap_rank=8,
         period_bin_count=32,
         period_feature_dim=16,
+        decoder_width=512,
+        decoder_blocks=6,
     )

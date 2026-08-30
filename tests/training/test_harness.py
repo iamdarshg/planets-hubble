@@ -11,6 +11,7 @@ from training import (
     make_tiny_adapter_batch,
     resolve_device,
 )
+from training.adapters import AstroMambaHTrainingBatch
 
 
 def test_cpu_training_is_bounded_and_reports_finite_state():
@@ -39,6 +40,7 @@ def test_cpu_training_is_bounded_and_reports_finite_state():
 
 def test_device_selection_rejects_unavailable_explicit_cuda():
     assert resolve_device("cpu") == torch.device("cpu")
+    assert resolve_device("auto").type in {"cpu", "cuda"}
 
     if not torch.cuda.is_available():
         with pytest.raises(RuntimeError, match="CUDA requested but unavailable"):
@@ -101,3 +103,21 @@ def test_gradient_nonfinite_check_fails_before_optimizer_step():
         )
 
     assert trainer.state.optimizer_steps == 0
+
+
+def test_default_loss_uses_global_and_auxiliary_logits_with_multi_visit_shapes():
+    prediction = {
+        "head_logits": {"event": torch.tensor([0.2, -0.3], requires_grad=True)},
+        "visit_event_logits": torch.tensor([[0.1, -0.2], [0.3, 0.4]], requires_grad=True),
+    }
+    batch = AstroMambaHTrainingBatch(
+        inputs=make_tiny_adapter_batch(batch_size=2),
+        target=torch.tensor([[1.0], [0.0]]),
+        auxiliary_targets={"visit_event": torch.tensor([[1.0, 0.0], [0.0, 1.0]])},
+    )
+
+    loss = __import__("training").default_loss_fn(prediction, batch)
+    assert loss.ndim == 0
+    loss.backward()
+    assert prediction["head_logits"]["event"].grad is not None
+    assert prediction["visit_event_logits"].grad is not None

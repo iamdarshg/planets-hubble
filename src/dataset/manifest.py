@@ -49,7 +49,19 @@ def build_manifest_record(
         observer_velocity=_mapping_or_none(
             _first(product, observation, "observer_velocity", "v_geo")
         ),
-        pointing=_mapping_or_none(_first(product, observation, "pointing")),
+        pointing=_merged_known_mapping(
+            product,
+            observation,
+            (
+                "pointing",
+                "roll_deg",
+                "off_axis_angle_deg",
+                "boresight_ra_deg",
+                "boresight_dec_deg",
+                "solar_elongation_deg",
+                "pa_aper",
+            ),
+        ),
         coverage=_merged_known_mapping(
             product, observation, ("exposure_count", "coverage", "s_region", "valid_fraction")
         ),
@@ -99,7 +111,7 @@ def _merged_known_mapping(
             value = row.get(key)
             if value is None:
                 continue
-            if key in {"coverage", "quality"} and isinstance(value, Mapping):
+            if isinstance(value, Mapping):
                 result.update(value)
             else:
                 result[key] = value

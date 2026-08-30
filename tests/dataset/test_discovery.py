@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from dataset.mast import MastDiscoveryClient, MastResponseError
+from dataset.mast import DiscoveryFilters, MastDiscoveryClient, MastResponseError
 from dataset.transport import MastJsonTransport
 
 
@@ -169,6 +169,38 @@ def test_sky_patch_can_use_filtered_position_and_filters_public_science_rows() -
         "dataproduct_type",
     }
     assert [record.observation_id for record in manifest.records] == ["public"]
+
+
+def test_timeseries_helpers_add_an_explicit_caom_timeseries_filter() -> None:
+    transport = FixtureTransport(
+        [
+            {"data": [_observation(obsid="series", product_type="TIMESERIES")]},
+            {"data": [_product("series")]},
+        ]
+    )
+
+    manifest = MastDiscoveryClient(transport).discover_time_series_sky_patch(
+        patch_id="series-patch",
+        ra_deg=10.0,
+        dec_deg=-20.0,
+        radius_deg=0.2,
+        instruments=("WFC3/UVIS",),
+    )
+
+    request = transport.calls[0][1]
+    assert request["service"] == "Mast.Caom.Filtered.Position"
+    assert {item["paramName"]: item["values"] for item in request["params"]["filters"]}["dataproduct_type"] == ["TIMESERIES"]
+    assert manifest.records[0].product_type == "TIMESERIES"
+
+
+def test_timeseries_helper_rejects_a_non_timeseries_product_type() -> None:
+    with pytest.raises(ValueError, match="TIMESERIES"):
+        MastDiscoveryClient(FixtureTransport([])).discover_time_series_named_target(
+            "Vega",
+            patch_id="series",
+            radius_deg=0.1,
+            filters=DiscoveryFilters(product_types=("IMAGE",)),
+        )
 
 
 def test_missing_optional_metadata_is_preserved_as_missing_and_no_uri_is_downloaded() -> None:

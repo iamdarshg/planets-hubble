@@ -42,6 +42,7 @@ class RealExposureParent:
     read_noise_electrons: float = 0.0
     saturation_electrons: float = 65535.0
     pixel_scale_arcsec: tuple[float, float] = (0.04, 0.04)
+    angular_size_arcsec: tuple[float, float] | None = None
     wcs: Any = None
     pointing: Mapping[str, Any] = field(default_factory=dict)
     observer_position: tuple[float, float, float] | None = None
@@ -67,6 +68,13 @@ class RealExposureParent:
             raise ValueError("detector noise must be non-negative and saturation positive")
         if any(scale <= 0.0 for scale in self.pixel_scale_arcsec):
             raise ValueError("pixel_scale_arcsec values must be positive")
+        angular_size = None
+        if self.angular_size_arcsec is not None:
+            angular_size = tuple(float(size) for size in self.angular_size_arcsec)
+            if len(angular_size) != 2 or any(
+                not np.isfinite(size) or size <= 0.0 for size in angular_size
+            ):
+                raise ValueError("angular_size_arcsec values must be finite and positive")
 
         science = _readonly_array(self.science, name="science")
         uncertainty = _readonly_array(self.uncertainty, name="uncertainty")
@@ -93,6 +101,7 @@ class RealExposureParent:
 
         object.__setattr__(self, "t_start_bjd_tdb", start)
         object.__setattr__(self, "t_end_bjd_tdb", end)
+        object.__setattr__(self, "angular_size_arcsec", angular_size)
         object.__setattr__(self, "science", science)
         object.__setattr__(self, "uncertainty", uncertainty)
         object.__setattr__(self, "dq", dq)
@@ -119,6 +128,9 @@ class RealObservationParent:
     source_x: float
     source_y: float
     exposures: tuple[RealExposureParent, ...]
+    object_tokens: np.ndarray | None = None
+    object_mask: np.ndarray | None = None
+    object_metadata: tuple[Mapping[str, Any], ...] = ()
     provenance: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -131,6 +143,26 @@ class RealObservationParent:
             raise ValueError("a real observation parent needs at least one exposure")
         if any(not isinstance(exposure, RealExposureParent) for exposure in exposures):
             raise TypeError("exposures must contain RealExposureParent values")
+        object_tokens = None
+        if self.object_tokens is not None:
+            object_tokens = np.asarray(self.object_tokens, dtype=np.float32).copy()
+            if object_tokens.ndim != 2:
+                raise ValueError("object_tokens must have shape [objects, features]")
+            object_tokens.setflags(write=False)
+        object_mask = None
+        if self.object_mask is not None:
+            object_mask = np.asarray(self.object_mask, dtype=bool).copy()
+            if object_mask.ndim != 1:
+                raise ValueError("object_mask must have shape [objects]")
+            if object_tokens is not None and object_mask.shape[0] != object_tokens.shape[0]:
+                raise ValueError("object_mask and object_tokens must have matching object counts")
+            object_mask.setflags(write=False)
+        metadata = tuple(dict(item) for item in self.object_metadata)
+        if object_tokens is not None and metadata and len(metadata) != object_tokens.shape[0]:
+            raise ValueError("object_metadata and object_tokens must have matching object counts")
+        object.__setattr__(self, "object_tokens", object_tokens)
+        object.__setattr__(self, "object_mask", object_mask)
+        object.__setattr__(self, "object_metadata", metadata)
         object.__setattr__(self, "exposures", exposures)
         object.__setattr__(self, "provenance", dict(self.provenance))
 

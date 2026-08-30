@@ -8,7 +8,8 @@ full science sample.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
+from typing import Mapping
 from typing import Optional
 
 import torch
@@ -157,6 +158,7 @@ class AstroMambaHTrainingBatch:
 
     inputs: AstroMambaHInputs
     target: Tensor
+    auxiliary_targets: Mapping[str, Tensor] = field(default_factory=dict)
 
     @property
     def batch_size(self) -> int:
@@ -175,6 +177,9 @@ class AstroMambaHTrainingBatch:
             "local_time",
             "long_time",
             "coverage_map",
+            "visit_mask",
+            "step_mask",
+            "source_xy",
         )
         values = {
             name: getattr(self.inputs, name).to(device)
@@ -185,6 +190,7 @@ class AstroMambaHTrainingBatch:
         return AstroMambaHTrainingBatch(
             inputs=AstroMambaHInputs(**values),
             target=self.target.to(device),
+            auxiliary_targets={name: value.to(device) for name, value in self.auxiliary_targets.items()},
         )
 
 

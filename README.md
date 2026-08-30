@@ -13,7 +13,7 @@ This repository currently provides three connected layers:
 3. Parent-conditioned Hubble Synthetic V2: exact cadence replay, coupled
    population draws, empirical-first PSFs, UVIS/IR detector contracts, and
    real-parent transit injection.
-4. AstroMamba-H model construction, heatmap/orbit outputs, and local CUDA
+4. AstroMamba-H model construction, source-specific heatmap/orbit outputs, and local CUDA
    validation.
 
 The project is not an exoplanet-confirmation system. A model score is a
@@ -60,10 +60,12 @@ stream = iter_synthetic_training_batches(
 
 The iterator generates one bundle at a time, alternates injected and null
 views, preserves uncertainty and missingness, and does not cache the full
-training set. Synthetic observations are for pretraining and controlled
-ablation. Real Hubble products are reserved for post-training/fine-tuning and
-held-out evaluation; large real FITS files should remain in external storage,
-with manifests, hashes, and provenance retained in the repository.
+training set. For counterfactual training with shared nuisance realizations,
+use `iter_paired_synthetic_training_batches`. Synthetic observations are for
+pretraining and controlled ablation. Real Hubble products are reserved for
+post-training/fine-tuning and held-out evaluation; large real FITS files
+should remain in external storage, with manifests, hashes, and provenance
+retained in the repository.
 
 For the realism-upgraded path, construct a `RealObservationParent` from loaded
 MAST/FITS products and use `HubbleSyntheticV2` or
@@ -73,6 +75,13 @@ injection. See [`docs/HUBBLE_SYNTHETIC_V2.md`](docs/HUBBLE_SYNTHETIC_V2.md) for
 the R0-R5 boundary. The repository does not claim to bundle `calwf3`, CRDS
 reference files, AstroDrizzle, or large empirical PSF/archive assets.
 
+`MastDiscoveryClient.discover_time_series_named_target` and
+`discover_time_series_sky_patch` constrain the CAOM `dataproduct_type` to
+`TIMESERIES`. `ManifestParentLoader` converts those records into immutable
+real-parent exposures, requiring an explicit time converter when MAST reports
+MJD or another time system. `FitsManifestParentLoader` is available when
+Astropy and local downloaded products are installed.
+
 ## Model and GPU smoke tests
 
 The routine bounded smoke uses the tiny configuration:
@@ -81,21 +90,31 @@ The routine bounded smoke uses the tiny configuration:
 python examples/synthetic_model_smoke.py --device cuda
 ```
 
-The research-size configuration is approximately 84M parameters and performs
-one full-resolution synthetic optimizer step:
+The research-size configuration is currently approximately 50M parameters
+and performs one full-resolution synthetic optimizer step:
 
 ```text
 python examples/synthetic_model_smoke.py --device cuda --research
 ```
 
-The research configuration currently measures `84,004,564` parameters and
-uses BF16 AMP on the validated local RTX 4060 Laptop GPU. The smoke proves
-finite forward/backward/optimizer behavior; it does not prove convergence,
-scientific sensitivity, calibrated probabilities, or an exoplanet discovery.
+The research configuration is intentionally in the 50-65M allocation window:
+capacity goes to multi-scale spatial fusion, source-aware modality encoding,
+per-source temporal hierarchy, and the dense decoder. Its temporal backend is
+portable gated-convolution fallback by default and can use Mamba-2 when the
+optional `mamba-ssm` package is installed. The smoke proves finite
+forward/backward/optimizer behavior; it does not prove convergence, scientific
+sensitivity, calibrated probabilities, or an exoplanet discovery.
+
+For a bounded two-phase run, use `training.train_synthetic_then_real`:
+synthetic pretraining runs first, then real-parent injection/fine-tuning is run
+only when real parents are supplied, and held-out parent evaluation is
+reported separately. The runner enforces the 1.8 GiB host-RSS and 5 GiB storage
+caps by default.
 
 ## Data discovery and streaming
 
-The MAST client supports named-target and sky-patch workflows. Discovery writes
+The MAST client supports named-target, sky-patch, and explicit timeseries
+workflows. Discovery writes
 normalized manifest records containing observation/product identifiers,
 download URIs, time bounds, exposure duration, wavelength/passband metadata,
 WCS/spatial footprint, observer state, pointing, coverage, and quality fields.

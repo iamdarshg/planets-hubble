@@ -27,6 +27,8 @@ class NonFiniteTrainingError(RuntimeError):
 def resolve_device(requested: DeviceRequest = "auto") -> torch.device:
     """Resolve a requested device without silently falling back from CUDA."""
 
+    if str(requested) == "auto":
+        return torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu")
     device = torch.device(requested)
     if device.type == "cuda":
         if not torch.cuda.is_available():
@@ -179,7 +181,7 @@ def _target_from_batch(batch: Any) -> Tensor:
 
 
 def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
-    """Binary event loss for tensor predictions or common model head outputs."""
+    """Structured BCE loss that prefers logits and respects training levels."""
 
     target = _target_from_batch(batch).to(dtype=torch.float32)
     if isinstance(prediction, Mapping):
@@ -187,6 +189,52 @@ def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
             prediction = prediction["prediction"]
         elif "logits" in prediction:
             prediction = prediction["logits"]
+        elif "head_logits" in prediction:
+            head_logits = prediction["head_logits"]
+            global_logits = head_logits["event"]
+            global_target = target.reshape_as(global_logits)
+            loss = F.binary_cross_entropy_with_logits(global_logits, global_target)
+            auxiliary_targets = getattr(batch, "auxiliary_targets", {})
+            if not auxiliary_targets and isinstance(batch, Mapping):
+                auxiliary_targets = batch.get("auxiliary_targets", {})
+            auxiliary_predictions = {
+                "candidate": head_logits.get("candidate"),
+                "artifact": head_logits.get("artifact"),
+                "ood": head_logits.get("ood"),
+                "coverage": head_logits.get("coverage"),
+                "sufficiency": head_logits.get("sufficiency"),
+                "visit_event": prediction.get("visit_event_logits"),
+                "source_event": prediction.get("source_event_logits"),
+                "frame_event": prediction.get("frame_event_logits"),
+                "source": prediction.get("source_logits"),
+                "period_constraint": prediction.get("orbit", {}).get("constraint_logits"),
+            }
+            weights = {
+                "candidate": 0.5,
+                "artifact": 0.25,
+                "ood": 0.25,
+                "coverage": 0.25,
+                "sufficiency": 0.25,
+                "visit_event": 0.5,
+                "source_event": 0.5,
+                "frame_event": 0.5,
+                "source": 0.5,
+            }
+            for name, auxiliary_target in auxiliary_targets.items():
+                logits = auxiliary_predictions.get(name)
+                if logits is None:
+                    continue
+                if name == "period_constraint":
+                    loss = loss + weights.get(name, 0.5) * F.cross_entropy(
+                        logits,
+                        auxiliary_target.to(device=logits.device, dtype=torch.long).reshape(-1),
+                    )
+                    continue
+                loss = loss + weights.get(name, 0.25) * F.binary_cross_entropy_with_logits(
+                    logits,
+                    auxiliary_target.to(device=logits.device, dtype=torch.float32).reshape_as(logits),
+                )
+            return loss
         else:
             heads = prediction.get("global_heads", prediction)
             prediction = heads["event_probability"]
@@ -198,6 +246,55 @@ def default_loss_fn(prediction: Any, batch: Any) -> Tensor:
     if not isinstance(prediction, Tensor):
         raise TypeError("model output must be a Tensor or supported mapping")
     return F.binary_cross_entropy_with_logits(prediction, target)
+
+
+def event_only_loss_fn(prediction: Any, batch: Any) -> Tensor:
+    """Curriculum loss for testing whether global event evidence is learnable.
+
+    The full objective supervises localization and quality heads, but those
+    auxiliary terms can obscure a first synthetic learnability test. This loss
+    keeps only the level-correct global event logit and is not the final
+    multi-task objective.
+    """
+    target = _target_from_batch(batch).to(dtype=torch.float32)
+    if isinstance(prediction, Mapping):
+        if "head_logits" in prediction:
+            prediction = prediction["head_logits"]["event"]
+        elif "global_event_logits" in prediction:
+            prediction = prediction["global_event_logits"]
+        elif "prediction" in prediction:
+            prediction = prediction["prediction"]
+        elif "logits" in prediction:
+            prediction = prediction["logits"]
+    if not isinstance(prediction, Tensor):
+        raise TypeError("event_only_loss requires model event logits")
+    return F.binary_cross_entropy_with_logits(prediction, target.reshape_as(prediction))
+
+
+def source_event_loss_fn(prediction: Any, batch: Any) -> Tensor:
+    """Proposal-aware curriculum loss for synthetic source discovery.
+
+    The global event logit can only see useful source evidence once persistent
+    anchors land on the source. This objective therefore trains the global
+    event decision together with the differentiable source heatmap while
+    leaving the other auxiliary heads for the later multi-task phase.
+    """
+    target = _target_from_batch(batch).to(dtype=torch.float32)
+    if not isinstance(prediction, Mapping):
+        raise TypeError("source_event_loss requires a structured model output")
+    head_logits = prediction.get("head_logits", {})
+    event_logits = head_logits.get("event", prediction.get("global_event_logits"))
+    if not isinstance(event_logits, Tensor):
+        raise TypeError("source_event_loss requires global event logits")
+    loss = F.binary_cross_entropy_with_logits(event_logits, target.reshape_as(event_logits))
+    source_target = getattr(batch, "auxiliary_targets", {}).get("source")
+    source_logits = prediction.get("source_logits")
+    if source_target is not None and isinstance(source_logits, Tensor):
+        loss = loss + 0.5 * F.binary_cross_entropy_with_logits(
+            source_logits,
+            source_target.to(device=source_logits.device, dtype=torch.float32).reshape_as(source_logits),
+        )
+    return loss
 
 
 def _finite_gradients(model: nn.Module) -> bool:
@@ -290,6 +387,7 @@ class BoundedTrainer:
             if epoch_batches >= self.config.max_batches_per_epoch:
                 break
             moved_batch = _move_to_device(batch, self.device)
+            batch_count = _batch_size(moved_batch)
             self.optimizer.zero_grad(set_to_none=True)
             with self._autocast():
                 prediction = self.model(moved_batch)
@@ -317,13 +415,22 @@ class BoundedTrainer:
             else:
                 self.optimizer.step()
 
+            loss_value = float(loss.detach().cpu())
+
+            # The model returns a rich dictionary containing full-resolution
+            # heatmaps and temporal diagnostics.  Release that graph and the
+            # device-side batch before the next streamed sample; otherwise a
+            # caller that retains only scalar reports can still keep the
+            # previous autograd graph alive through Python frame locals.
+            del prediction, loss, moved_batch
+
             epoch_batches += 1
-            epoch_samples += _batch_size(moved_batch)
+            epoch_samples += batch_count
             self.state.global_step += 1
             self.state.batches_seen += 1
-            self.state.samples_seen += _batch_size(moved_batch)
+            self.state.samples_seen += batch_count
             self.state.optimizer_steps += 1
-            self.state.last_loss = float(loss.detach().cpu())
+            self.state.last_loss = loss_value
             self.state.loss_is_finite = True
 
         self.state.epoch += 1

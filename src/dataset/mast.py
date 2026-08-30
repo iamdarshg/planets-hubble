@@ -57,6 +57,30 @@ class MastDiscoveryClient:
             source_identifier=source_identifier,
         )
 
+    def discover_time_series_named_target(
+        self,
+        name: str,
+        *,
+        patch_id: str,
+        radius_deg: float,
+        filters: DiscoveryFilters | None = None,
+        search_service: str = "Mast.Caom.Cone",
+    ) -> DiscoveryManifest:
+        """Discover public CAOM products declared as ``TIMESERIES``.
+
+        MAST exposes this as a CAOM ``dataproduct_type`` value.  The helper
+        makes that constraint explicit so callers do not accidentally mix
+        images and spectra into a time-series parent without inspecting the
+        manifest first.
+        """
+        return self.discover_named_target(
+            name,
+            patch_id=patch_id,
+            radius_deg=radius_deg,
+            filters=_timeseries_filters(filters),
+            search_service=search_service,
+        )
+
     def discover_sky_patch(
         self,
         *,
@@ -88,6 +112,38 @@ class MastDiscoveryClient:
             filters=combined,
             search_service=search_service,
             source_identifier=None,
+        )
+
+    def discover_time_series_sky_patch(
+        self,
+        *,
+        patch_id: str,
+        ra_deg: float,
+        dec_deg: float,
+        radius_deg: float,
+        filters: DiscoveryFilters | None = None,
+        instruments: Sequence[str] = (),
+        calibration_levels: Sequence[int] = (),
+        passbands: Sequence[str] = (),
+        search_service: str = "Mast.Caom.Filtered.Position",
+    ) -> DiscoveryManifest:
+        """Discover public timeseries products in an explicit sky patch."""
+        if filters is not None and any((instruments, calibration_levels, passbands)):
+            raise ValueError("pass filters or individual filter sequences, not both")
+        chosen = filters or DiscoveryFilters(
+            instruments=tuple(instruments),
+            product_types=("TIMESERIES",),
+            calibration_levels=tuple(calibration_levels),
+            passbands=tuple(passbands),
+        )
+        chosen = _timeseries_filters(chosen)
+        return self.discover_sky_patch(
+            patch_id=patch_id,
+            ra_deg=ra_deg,
+            dec_deg=dec_deg,
+            radius_deg=radius_deg,
+            filters=chosen,
+            search_service=search_service,
         )
 
     def _discover_position(
@@ -230,6 +286,22 @@ def _mast_filters(filters: DiscoveryFilters) -> list[dict[str, Any]]:
         if values:
             result.append({"paramName": name, "values": list(values)})
     return result
+
+
+def _timeseries_filters(filters: DiscoveryFilters | None) -> DiscoveryFilters:
+    """Return filters constrained to MAST's CAOM TIMESERIES type."""
+    if filters is None:
+        return DiscoveryFilters(product_types=("TIMESERIES",))
+    if filters.product_types and any(
+        str(value).upper() != "TIMESERIES" for value in filters.product_types
+    ):
+        raise ValueError("timeseries discovery only accepts product_types=('TIMESERIES',)")
+    return DiscoveryFilters(
+        instruments=filters.instruments,
+        product_types=("TIMESERIES",),
+        calibration_levels=filters.calibration_levels,
+        passbands=filters.passbands,
+    )
 
 
 def _int_or_none(value: Any) -> int | None:

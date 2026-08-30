@@ -1,6 +1,18 @@
 # Planets-Hubble: Multimodal Exoplanet Discovery Specification
 
-Status: design draft
+Status: design draft; executable bounded implementation is tracked below
+
+Implementation status (2026-08-30): the repository currently provides a
+50,187,735-parameter research preset with FPN spatial features, persistent
+source anchors, optional normalized `source_xy` hints for intentionally
+uncentered patches, wavelength/object/geometry encoders, structured logits,
+source-specific heatmaps, period-constraint probabilities, and per-source
+transit-time offsets. Synthetic and real-parent workers run on CUDA with a
+hard 1.8 GiB process-RSS cap. The proposed 82--86M Mamba-2 target remains a
+scaling target: the installed portable temporal backend is still the gated
+convolution fallback unless `mamba_ssm` is explicitly available and tested.
+The bounded current training probes are integration evidence, not calibrated
+exoplanet sensitivity evidence.
 
 ## 1. Purpose
 

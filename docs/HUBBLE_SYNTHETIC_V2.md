@@ -42,6 +42,15 @@ the per-exposure injected depth is returned as `relative_flux_drop`.
 
 ## Implemented API
 
+MAST discovery has explicit timeseries helpers for both named targets and sky
+patches. `ManifestParentLoader` consumes normalized manifest records while
+`FitsManifestParentLoader` lazily reads SCI/ERR/DQ extensions from FITS files;
+both preserve product identity, exposure timing, WCS/pointing, observer
+geometry, angular size, and provenance. Prepared 720x1280 NPZ parents are used
+by the low-RSS local worker. A timing converter is mandatory when a manifest
+is not already in BJD_TDB; the local preparation probe converts UTC MJD to TDB
+JD but does not claim a full barycentric light-time correction.
+
 ```python
 from synthetic import HubbleSyntheticV2, ObservationScheduleSampler
 
@@ -105,3 +114,11 @@ The parent-aware stream is lazy, but a full model raster is inherently large:
 one sample has shape `[1, visits, steps, 6, 720, 1280]`. Use one sample at a
 time, avoid dataset-wide caching, and enforce the repository’s local 1.8 GiB
 RSS and 5 GiB storage limits.
+
+For this reason `examples/train_isolated_gpu.py` and
+`examples/finetune_real_isolated.py` run one optimizer update per fresh worker.
+That process boundary prevents CUDA allocator/workspace growth from turning a
+multi-step exploratory run into a host-RSS violation. The synthetic stream
+uses paired null/injected views; real-parent fine-tuning and holdout scoring
+use the same parent loader and never write the known flux-drop label into the
+model raster.

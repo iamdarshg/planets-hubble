@@ -47,7 +47,10 @@ def iter_synthetic_training_batches(
             **{
                 name: torch.from_numpy(value).to(target_device)
                 for name, value in arrays.items()
-            }
+            },
+            source_xy=torch.tensor(
+                [[config.source_x, config.source_y]], dtype=torch.float32, device=target_device
+            ),
         )
         view = bundle.null if view_name == "null" else bundle.injected
         target = torch.tensor(
@@ -55,7 +58,101 @@ def iter_synthetic_training_batches(
             dtype=torch.float32,
             device=target_device,
         )
-        yield AstroMambaHTrainingBatch(inputs=inputs, target=target)
+        event_mask = view.labels.event_mask
+        if event_mask is None:
+            event_mask = np.zeros((config.visits, config.local_steps), dtype=np.float32)
+        else:
+            event_mask = event_mask.astype(np.float32, copy=False)
+        auxiliary_targets = {
+            "candidate": target[:, 0],
+            "artifact": torch.zeros(1, device=target_device),
+            "ood": torch.zeros(1, device=target_device),
+            "coverage": torch.ones(1, device=target_device),
+            "sufficiency": torch.ones(1, device=target_device),
+            "visit_event": torch.from_numpy(event_mask.any(axis=1).astype(np.float32))[None].to(target_device),
+            "frame_event": torch.from_numpy(event_mask)[None].to(target_device),
+            "source": torch.from_numpy(
+                _source_target_map(config.visits, config.local_steps, config.source_x, config.source_y)
+            )[None].to(target_device),
+        }
+        yield AstroMambaHTrainingBatch(
+            inputs=inputs, target=target, auxiliary_targets=auxiliary_targets
+        )
+
+
+def iter_paired_synthetic_training_batches(
+    config: SyntheticConfig,
+    *,
+    sample_count: int,
+    device: torch.device | str = "cpu",
+) -> Iterator[AstroMambaHTrainingBatch]:
+    """Yield null and injected counterfactual views from one shared scene.
+
+    The pair is generated once and stacked along the batch axis, preserving
+    the common noise/nuisance realization for contrastive or ranking losses.
+    """
+
+    if not isinstance(sample_count, int) or sample_count < 0:
+        raise ValueError("sample_count must be a non-negative integer")
+    if (config.raster_height, config.raster_width) != (720, 1280):
+        raise ValueError("synthetic training batches require a 720x1280 raster config")
+    target_device = torch.device(device)
+    for sample_index in range(sample_count):
+        sample_config = replace(config, seed=config.seed + sample_index)
+        bundle = SyntheticGenerator(sample_config).generate()
+        views = (bundle.null, bundle.injected)
+        numpy_views = [bundle.as_model_numpy(name) for name in ("null", "injected")]
+        inputs = AstroMambaHInputs(
+            **{
+                name: torch.cat(
+                    [torch.from_numpy(view[name]) for view in numpy_views], dim=0
+                ).to(target_device)
+                for name in numpy_views[0]
+            },
+            source_xy=torch.tensor(
+                [[config.source_x, config.source_y], [config.source_x, config.source_y]],
+                dtype=torch.float32,
+                device=target_device,
+            ),
+        )
+        targets = torch.tensor(
+            [[float(view.labels.latent_positive)] for view in views],
+            dtype=torch.float32,
+            device=target_device,
+        )
+        frame_targets = []
+        visit_targets = []
+        for view in views:
+            mask = view.labels.event_mask
+            if mask is None:
+                mask = np.zeros((config.visits, config.local_steps), dtype=np.float32)
+            else:
+                mask = mask.astype(np.float32, copy=False)
+            frame_targets.append(torch.from_numpy(mask))
+            visit_targets.append(torch.from_numpy(mask.any(axis=1).astype(np.float32)))
+        yield AstroMambaHTrainingBatch(
+            inputs=inputs,
+            target=targets,
+            auxiliary_targets={
+                "candidate": targets[:, 0],
+                "artifact": torch.zeros(2, device=target_device),
+                "ood": torch.zeros(2, device=target_device),
+                "coverage": torch.ones(2, device=target_device),
+                "sufficiency": torch.ones(2, device=target_device),
+                "frame_event": torch.stack(frame_targets).to(target_device),
+                "visit_event": torch.stack(visit_targets).to(target_device),
+                "source": torch.from_numpy(
+                    np.stack(
+                        [
+                            _source_target_map(
+                                config.visits, config.local_steps, config.source_x, config.source_y
+                            )
+                            for _ in range(2)
+                        ]
+                    )
+                ).to(target_device),
+            },
+        )
 
 
 def iter_parented_synthetic_training_batches(
@@ -63,6 +160,7 @@ def iter_parented_synthetic_training_batches(
     *,
     sample_count: int,
     device: torch.device | str = "cpu",
+    start_index: int = 0,
 ) -> Iterator[AstroMambaHTrainingBatch]:
     """Lazily inject events into real parents and convert one bundle at a time.
 
@@ -73,11 +171,14 @@ def iter_parented_synthetic_training_batches(
 
     if not isinstance(sample_count, int) or sample_count < 0:
         raise ValueError("sample_count must be a non-negative integer")
+    if not isinstance(start_index, int) or start_index < 0:
+        raise ValueError("start_index must be a non-negative integer")
     parent_list = tuple(parents)
     if sample_count and not parent_list:
         raise ValueError("at least one parent is required for a non-empty stream")
     target_device = torch.device(device)
-    for sample_index in range(sample_count):
+    for local_index in range(sample_count):
+        sample_index = start_index + local_index
         parent = parent_list[sample_index % len(parent_list)]
         if any(
             exposure.science is None
@@ -101,13 +202,23 @@ def iter_parented_synthetic_training_batches(
         raster = np.zeros((1, visits, steps, 6, 720, 1280), dtype=np.float32)
         wavelength_tokens = np.zeros((1, visits, steps, 1, 8), dtype=np.float32)
         wavelength_mask = np.zeros((1, visits, steps, 1), dtype=bool)
-        object_tokens = np.zeros((1, visits, 1, 12), dtype=np.float32)
-        object_mask = np.ones((1, visits, 1), dtype=bool)
+        parent_objects = parent.object_tokens
+        object_count = 1 if parent_objects is None else parent_objects.shape[0]
+        if parent_objects is not None and parent_objects.shape[1] != 12:
+            raise ValueError("parent object_tokens must have 12 features for AstroMamba-H")
+        object_tokens = np.zeros((1, visits, object_count, 12), dtype=np.float32)
+        object_mask = np.ones((1, visits, object_count), dtype=bool)
+        if parent.object_mask is not None:
+            if parent.object_mask.shape[0] != object_count:
+                raise ValueError("parent object_mask does not match parent object_tokens")
+            object_mask[:] = parent.object_mask[None, None, :]
         geometry = np.zeros((1, visits, steps, 10), dtype=np.float32)
         exposure_duration = np.ones((1, visits, steps, 1), dtype=np.float32)
         coverage = np.zeros((1, visits, steps, 6), dtype=np.float32)
         local_time = np.zeros((1, visits, steps, 5), dtype=np.float32)
         long_time = np.zeros((1, visits, 5), dtype=np.float32)
+        step_valid = np.zeros((1, visits, steps), dtype=bool)
+        frame_targets = np.zeros((visits, steps), dtype=np.float32)
         time_origin = parent.exposures[0].t_mid_bjd_tdb
         for visit_index, group in enumerate(visit_groups):
             visit_midpoints = []
@@ -115,18 +226,31 @@ def iter_parented_synthetic_training_batches(
                 science = injected_exposure.science
                 uncertainty = injected_exposure.uncertainty
                 dq = injected_exposure.dq
-                scale = max(float(np.nanmedian(uncertainty)), 1.0e-6)
+                science = np.nan_to_num(science, nan=0.0, posinf=0.0, neginf=0.0)
+                uncertainty = np.nan_to_num(np.abs(uncertainty), nan=0.0, posinf=0.0, neginf=0.0)
                 baseline = float(np.nanmedian(science))
-                raster[0, visit_index, step_index, 0] = (science - baseline) / scale
-                raster[0, visit_index, step_index, 1] = injected_exposure.relative_flux_drop
-                raster[0, visit_index, step_index, 2] = uncertainty / scale
+                residual = science - baseline
+                robust_scale = float(np.nanpercentile(np.abs(residual), 75.0))
+                uncertainty_scale = float(np.nanpercentile(uncertainty, 75.0))
+                scale = max(robust_scale, uncertainty_scale, 1.0)
+                # Both signal channels must be observable from the parent
+                # exposure.  Do not write the known synthetic label/drop into
+                # the raster: that would make training trivially leak the
+                # target and would be unavailable at inference time.
+                raster[0, visit_index, step_index, 0] = np.clip(
+                    science / max(abs(baseline), 1.0) - 1.0, -20.0, 20.0
+                )
+                raster[0, visit_index, step_index, 1] = np.clip(residual / scale, -20.0, 20.0)
+                raster[0, visit_index, step_index, 2] = np.clip(uncertainty / scale, 0.0, 20.0)
                 raster[0, visit_index, step_index, 3] = (dq == 0).astype(np.float32)
                 raster[0, visit_index, step_index, 5] = 1.0
+                step_valid[0, visit_index, step_index] = True
+                frame_targets[visit_index, step_index] = injected_exposure.relative_flux_drop > 0.0
                 wavelength_tokens[0, visit_index, step_index, 0] = np.array(
                     [
                         np.log10(_filter_wavelength(exposure.filter_name)) / 4.0,
-                        float(np.nanmean(science - baseline)) / scale,
-                        float(np.nanmean(uncertainty)) / scale,
+                        float(np.clip(np.nanmean(residual) / scale, -20.0, 20.0)),
+                        float(np.clip(np.nanmean(uncertainty) / scale, 0.0, 20.0)),
                         1.0,
                         exposure.exposure_seconds,
                         1.0,
@@ -141,12 +265,12 @@ def iter_parented_synthetic_training_batches(
                 roll = float(exposure.pointing.get("roll_deg", 0.0))
                 geometry[0, visit_index, step_index] = np.asarray(
                     [
-                        parent.source_x / 1280.0,
-                        parent.source_y / 720.0,
-                        exposure.focus or 0.0,
                         *observer_position,
                         *observer_velocity,
                         roll / 360.0,
+                        float(exposure.pointing.get("off_axis_angle_deg", 0.0)) / 180.0,
+                        float(exposure.pointing.get("boresight_ra_deg", 0.0)) / 360.0,
+                        float(exposure.pointing.get("boresight_dec_deg", 0.0)) / 90.0,
                     ],
                     dtype=np.float32,
                 )
@@ -161,26 +285,38 @@ def iter_parented_synthetic_training_batches(
                     ],
                     dtype=np.float32,
                 )
+                angular_size = exposure.angular_size_arcsec or (1.0, 1.0)
                 coverage[0, visit_index, step_index] = np.asarray(
-                    [1.0, float(np.mean(dq == 0)), 1.0, 1.0, float(exposure.wcs is not None), float(exposure.observer_position is not None)],
+                    [
+                        1.0,
+                        float(np.mean(dq == 0)),
+                        1.0,
+                        angular_size[0] / 100.0,
+                        angular_size[1] / 100.0,
+                        float(exposure.observer_position is not None),
+                    ],
                     dtype=np.float32,
                 )
                 visit_midpoints.append(exposure.t_mid_bjd_tdb)
             first_exposure = group[0][0]
             observer_position = first_exposure.observer_position or (0.0, 0.0, 0.0)
             observer_velocity = first_exposure.observer_velocity or (0.0, 0.0, 0.0)
-            object_tokens[0, visit_index, 0] = np.asarray(
-                [
-                    parent.source_x / 1280.0,
-                    parent.source_y / 720.0,
-                    *first_exposure.pixel_scale_arcsec,
-                    *observer_position,
-                    *observer_velocity,
-                    first_exposure.focus or 0.0,
-                    1.0,
-                ],
-                dtype=np.float32,
-            )
+            if parent_objects is None:
+                angular_size = first_exposure.angular_size_arcsec or (1.0, 1.0)
+                object_tokens[0, visit_index, 0] = np.asarray(
+                    [
+                        parent.source_x / 1280.0,
+                        parent.source_y / 720.0,
+                        *first_exposure.pixel_scale_arcsec,
+                        *observer_position,
+                        *observer_velocity,
+                        first_exposure.focus or 0.0,
+                        float(np.mean(angular_size)) / 100.0,
+                    ],
+                    dtype=np.float32,
+                )
+            else:
+                object_tokens[0, visit_index] = parent_objects
             long_time[0, visit_index] = np.asarray(
                 [
                     min(visit_midpoints) - time_origin,
@@ -202,13 +338,40 @@ def iter_parented_synthetic_training_batches(
             coverage_vector=torch.from_numpy(coverage).to(target_device),
             local_time=torch.from_numpy(local_time).to(target_device),
             long_time=torch.from_numpy(long_time).to(target_device),
+            visit_mask=torch.ones((1, visits), dtype=torch.bool, device=target_device),
+            step_mask=torch.from_numpy(step_valid).to(target_device),
+            source_xy=torch.tensor(
+                [[parent.source_x / 1280.0, parent.source_y / 720.0]],
+                dtype=torch.float32,
+                device=target_device,
+            ),
         )
         target = torch.tensor(
-            [[float(any(item.relative_flux_drop > 0.0 for item in result.injection.injected))]],
+            [[
+                float(
+                    sample_index % 2 == 0
+                    and any(item.relative_flux_drop > 0.0 for item in selected)
+                )
+            ]],
             dtype=torch.float32,
             device=target_device,
         )
-        yield AstroMambaHTrainingBatch(inputs=inputs, target=target)
+        yield AstroMambaHTrainingBatch(
+            inputs=inputs,
+            target=target,
+            auxiliary_targets={
+                "candidate": target[:, 0],
+                "artifact": torch.zeros(1, device=target_device),
+                "ood": torch.zeros(1, device=target_device),
+                "coverage": torch.from_numpy(step_valid.mean(axis=(1, 2))).to(target_device),
+                "sufficiency": torch.from_numpy(step_valid.mean(axis=(1, 2))).to(target_device),
+                "visit_event": torch.from_numpy(frame_targets.any(axis=1)[None]).to(target_device),
+                "frame_event": torch.from_numpy(frame_targets[None]).to(target_device),
+                "source": torch.from_numpy(
+                    _source_target_map(visits, steps, parent.source_x / 1280.0, parent.source_y / 720.0)[None]
+                ).to(target_device),
+            },
+        )
 
 
 def _filter_wavelength(filter_name: str) -> float:
@@ -223,3 +386,13 @@ def _filter_wavelength(filter_name: str) -> float:
         "F140W": 1400.0,
         "F160W": 1540.0,
     }.get(filter_name, 600.0)
+
+
+def _source_target_map(visits: int, steps: int, x: float, y: float) -> np.ndarray:
+    """Create a small supervised source-proposal target on the /8 grid."""
+    height, width = 90, 160
+    yy, xx = np.mgrid[:height, :width]
+    center_x = x * (width - 1)
+    center_y = y * (height - 1)
+    target = np.exp(-0.5 * (((xx - center_x) / 1.5) ** 2 + ((yy - center_y) / 1.5) ** 2))
+    return np.broadcast_to(target.astype(np.float32), (visits, steps, height, width)).copy()
