@@ -117,7 +117,7 @@ warm-up only for bounded tests or debugging.
 For a bounded two-phase run, use `training.train_synthetic_then_real`:
 synthetic pretraining runs first, then real-parent injection/fine-tuning is run
 only when real parents are supplied, and held-out parent evaluation is
-reported separately. The runner enforces the 1.8 GiB host-RSS and 5 GiB storage
+reported separately. The runner enforces the 1.6 GiB host-RSS and 5 GiB storage
 caps by default.
 
 ## Data discovery and streaming
@@ -137,14 +137,14 @@ inline values and `.npy`/`.npz` arrays.
 The intended local-development limits are:
 
 ```text
-host RSS: 1.8 GiB
+host RSS: 1.6 GiB
 storage:  5 GiB
 ```
 
 Synthetic generation and storage checks stay within those limits. The
-research-mode smoke constructs the model directly on CUDA and has measured
-approximately 1.67 GiB process RSS on the validated Windows/PyTorch/CUDA
-installation, within the revised host-RSS ceiling. See
+research-mode smoke constructs the model directly on CUDA. Earlier validated
+measurements were recorded against the previous 1.8 GiB ceiling and must be
+re-measured under the current 1.6 GiB ceiling before reuse. See
 [`docs/LOCAL_GPU.md`](docs/LOCAL_GPU.md) for the measured boundary.
 
 ## Project documents

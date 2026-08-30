@@ -112,7 +112,7 @@ milestone, not an implication of the current tests.
 
 The parent-aware stream is lazy, but a full model raster is inherently large:
 one sample has shape `[1, visits, steps, 6, 720, 1280]`. Use one sample at a
-time, avoid dataset-wide caching, and enforce the repository’s local 1.8 GiB
+time, avoid dataset-wide caching, and enforce the repository's local 1.6 GiB
 RSS and 5 GiB storage limits.
 
 For this reason `examples/train_isolated_gpu.py` and

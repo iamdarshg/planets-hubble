@@ -86,7 +86,7 @@ storage written:        0 bytes
 This is a functional optimization smoke, not convergence evidence. It shows
 that the research-size model can consume a real synthetic full-resolution
 bundle and update its parameters on the local GPU under the available VRAM and
-the revised 1.8 GiB host-RSS cap.
+the then-current 1.8 GiB host-RSS cap (historical).
 
 Synthetic pretraining is procedural: the training loop generates the next
 counterfactual bundle while the model is running. A bounded SSD cache can
@@ -132,23 +132,23 @@ performance estimate, and the current run used the sequence-summary fallback.
 
 ## Resource-cap result
 
-The requested caps are 1.8 GiB process RSS and 5 GiB storage. Every long
+The requested caps are 1.6 GiB process RSS and 5 GiB storage. Every long
 training/evaluation process must report these measurements; the values below
 are a gate, not a claim that an unmeasured future run is compliant:
 
 ```text
 measured research RSS: 1,842,831,360 bytes for the full research smoke (historical)
 measured isolated-step RSS: 1,892,282,368 bytes for the largest v7 worker
-RSS cap:                1.80 GiB
+RSS cap:                1.60 GiB (historical measurements were recorded under the previous 1.8 GiB cap)
 resource violation:     none in the recorded smoke/isolated-step runs
 stored artifacts plus real data: 899,189,524 bytes
 storage cap:             5 GiB
 ```
 
 The prior CPU-to-CUDA construction path reached approximately 1.88 GiB and
-was outside the revised cap. Research mode now constructs the model directly
-on CUDA, avoiding that migration overhead. The current smoke reports
-`rss_within_cap=true`.
+was outside the then-current cap. Research mode now constructs the model
+directly on CUDA, avoiding that migration overhead. Those reports were
+historical; fresh measurements under the 1.6 GiB cap are required.
 
 The previous full research smoke (approximately 50.2M parameters) measured
 finite loss, 1,701,552,128 bytes peak CUDA allocation, and 1,842,831,360 bytes
@@ -168,7 +168,8 @@ measurement.
 ## Full-parent sequence fallback and counterfactual integrity
 
 Flattening all four full-resolution parent exposures through the research
-model at once exceeded the host cap on this Windows/CUDA build:
+model at once exceeded the then-current host cap on this Windows/CUDA build
+(historical; measured under the previous 1.8 GiB cap):
 
 ```text
 full parent sequence, dense decoder:   1,971,089,408 bytes RSS (over cap)

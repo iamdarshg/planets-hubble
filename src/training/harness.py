@@ -14,9 +14,9 @@ DeviceRequest = str | torch.device
 AmpRequest = Literal["auto"] | bool
 LossFunction = Callable[[Any, Any], Tensor]
 # The local CUDA runtime needs more host memory than the original 720 MiB
-# budget. Keep the cap explicit in bytes while using the user's revised 1.8 GB
-# limit as 1.8 GiB for consistency with the previous MiB-based setting.
-DEFAULT_RSS_CAP_BYTES = int(1.8 * 1024 * 1024 * 1024)
+# budget. Keep the cap explicit in bytes while using the user's revised 1.6 GB
+# limit as 1.6 GiB for consistency with the previous MiB-based setting.
+DEFAULT_RSS_CAP_BYTES = int(1.6 * 1024 * 1024 * 1024)
 DEFAULT_STORAGE_CAP_BYTES = 5 * 1024 * 1024 * 1024
 
 
