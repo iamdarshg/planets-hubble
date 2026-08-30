@@ -98,6 +98,7 @@ def train_synthetic_then_real(
     bounded_smoke_test: bool = False,
     synthetic_cache_dir: str | Path | None = DEFAULT_SYNTHETIC_CACHE_DIR,
     synthetic_cache_size: int = DEFAULT_SYNTHETIC_CACHE_SIZE_MIB,
+    optimizer_learning_rate: float = 1e-4,
     real_max_steps: int = 16,
     target_loss: float = 0.05,
     target_patience: int = 3,
@@ -127,6 +128,8 @@ def train_synthetic_then_real(
         )
     if synthetic_cache_size < 1:
         raise ValueError("synthetic_cache_size must be positive")
+    if optimizer_learning_rate <= 0.0:
+        raise ValueError("optimizer_learning_rate must be positive")
     synthetic_cache_budget_bytes = synthetic_cache_size * 1024 * 1024
     if synthetic_cache_budget_bytes > storage_cap_bytes:
         raise ValueError("synthetic cache budget exceeds storage cap")
@@ -161,7 +164,7 @@ def train_synthetic_then_real(
             rss_cap_bytes=rss_cap_bytes,
             storage_cap_bytes=storage_cap_bytes,
         ),
-        optimizer=torch.optim.SGD(model.parameters(), lr=1e-4),
+        optimizer=torch.optim.SGD(model.parameters(), lr=optimizer_learning_rate),
     )
 
     synthetic_reports = _train_phase(

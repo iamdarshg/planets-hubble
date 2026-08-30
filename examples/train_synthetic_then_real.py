@@ -41,6 +41,13 @@ def main() -> int:
     parser.add_argument("--synthetic-steps", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES // 2)
     parser.add_argument("--synthetic-min-examples", type=int, default=DEFAULT_SYNTHETIC_MIN_EXAMPLES)
     parser.add_argument("--synthetic-start-index", type=int, default=0)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument(
+        "--bf16-weights",
+        action="store_true",
+        help="keep trainable weights in bfloat16 to reduce host/GPU memory; "
+        "use a larger learning rate (e.g. 1e-2) so updates stay representable",
+    )
     parser.add_argument(
         "--resume-from",
         type=Path,
@@ -90,6 +97,8 @@ def main() -> int:
             raise FileNotFoundError(args.resume_from)
         state = torch.load(args.resume_from, map_location=device, weights_only=False)
         model.load_state_dict(state["model"] if "model" in state else state, strict=False)
+    if args.bf16_weights:
+        model = model.to(device, dtype=torch.bfloat16)
     result = train_synthetic_then_real(
         model=model,
         synthetic_config=SyntheticConfig(
@@ -107,6 +116,7 @@ def main() -> int:
         bounded_smoke_test=args.bounded_smoke_test,
         synthetic_cache_dir=args.synthetic_cache_dir,
         synthetic_cache_size=args.synthetic_cache_size,
+        optimizer_learning_rate=args.learning_rate,
         real_max_steps=args.real_steps,
         target_loss=args.target_loss,
         target_patience=args.target_patience,

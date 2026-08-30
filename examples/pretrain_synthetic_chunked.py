@@ -34,6 +34,12 @@ def main() -> int:
     )
     parser.add_argument("--max-chunk-retries", type=int, default=3)
     parser.add_argument("--settle-seconds", type=int, default=20)
+    parser.add_argument(
+        "--bf16-weights",
+        action="store_true",
+        help="pass --bf16-weights and --learning-rate 1e-2 to each chunk "
+        "process to keep WorkingSet under the 1.6 GiB cap",
+    )
     args = parser.parse_args()
     if args.total_steps < 1 or args.chunk_steps < 1:
         raise ValueError("total-steps and chunk-steps must be positive")
@@ -72,6 +78,8 @@ def main() -> int:
             command += ["--resume-from", str(checkpoint)]
         if args.bounded_smoke_test:
             command.append("--bounded-smoke-test")
+        if args.bf16_weights:
+            command += ["--bf16-weights", "--learning-rate", "1e-2"]
         attempt = 0
         completed = None
         while True:
