@@ -59,6 +59,7 @@ def test_parented_stream_emits_full_resolution_model_batches() -> None:
                 filter_name="F606W",
                 t_start_bjd_tdb=20.0,
                 t_end_bjd_tdb=20.01,
+                exposure_duration_seconds=12.5,
                 science=image,
                 uncertainty=np.ones_like(image),
                 dq=np.zeros_like(image, dtype=np.uint16),
@@ -68,6 +69,8 @@ def test_parented_stream_emits_full_resolution_model_batches() -> None:
     batch = next(iter_parented_synthetic_training_batches((parent,), sample_count=1, device="cpu"))
     assert batch.inputs.raster.shape == (1, 1, 1, 6, 720, 1280)
     assert batch.inputs.wavelength_tokens.shape[-1] == 8
+    assert batch.inputs.exposure_duration.item() == 12.5
+    assert batch.inputs.wavelength_tokens[0, 0, 0, 0, 4].item() == 12.5
 
 
 def test_parented_stream_labels_null_counterfactual_as_negative() -> None:

@@ -199,6 +199,7 @@ class ManifestParentLoader:
             "filter_name": filter_name,
             "t_start_bjd_tdb": start,
             "t_end_bjd_tdb": end,
+            "exposure_duration_seconds": float(duration),
             "science": arrays.get("science"),
             "uncertainty": arrays.get("uncertainty"),
             "dq": arrays.get("dq"),

@@ -98,6 +98,22 @@ probabilities near 0.36. This is a controlled integration result, not a claim
 of Hubble exoplanet sensitivity; the holdout contains only four parent
 exposures and synthetic counterfactual labels.
 
+The expanded real-parent pass then covered 20 downloaded exposure records from
+six additional HST targets (HD 189733, WASP-12, WASP-39, WASP-43, HAT-P-11,
+and GJ 1214), producing 40 null/injected views. A normalization bug was found
+and fixed during this pass: MAST ``observation_start``/``observation_end`` can
+describe a broad visit window, while ``exposure_duration_seconds`` describes
+the actual integration. The parent contract now preserves both values and
+uses the explicit physical duration for detector and model inputs. After
+restarting from the clean synthetic checkpoint, all 40 updates were finite;
+the maximum recorded real-worker RSS was 1,911,873,536 bytes and peak CUDA
+allocation was 1,574,620,672 bytes. The final checkpoint was evaluated on the
+four held-out HD 209458 exposure indices and returned 0.50 accuracy (1/2 per
+index), with probabilities approximately 0.365--0.367. This confirms the
+repaired training/data path but does not establish learned real-data
+exoplanet sensitivity; the classifier has not yet reached grokking or a
+defensible detection threshold.
+
 ## Resource-cap result
 
 The requested caps are 1.8 GiB process RSS and 5 GiB storage. Every long

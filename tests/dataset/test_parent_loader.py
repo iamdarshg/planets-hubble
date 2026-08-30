@@ -36,6 +36,7 @@ def test_manifest_loader_builds_parent_without_inventing_cadence_or_time() -> No
 
     assert parent.exposures[0].t_start_bjd_tdb == 100.0
     assert parent.exposures[0].t_end_bjd_tdb == 100.02
+    assert parent.exposures[0].exposure_seconds == 1728.0
     assert parent.exposures[0].provenance["product_id"] == "prod-1"
     assert parent.exposures[0].pointing["roll_deg"] == 12.0
 

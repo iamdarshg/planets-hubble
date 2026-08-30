@@ -35,6 +35,10 @@ class RealExposureParent:
     filter_name: str
     t_start_bjd_tdb: float
     t_end_bjd_tdb: float
+    # MAST observation windows can cover a visit or scheduling interval rather
+    # than the integration represented by one product.  Keep the physical
+    # exposure duration explicit instead of deriving it from that window.
+    exposure_duration_seconds: float | None = None
     science: np.ndarray | None = None
     uncertainty: np.ndarray | None = None
     dq: np.ndarray | None = None
@@ -62,6 +66,11 @@ class RealExposureParent:
         end = float(self.t_end_bjd_tdb)
         if not np.isfinite(start) or not np.isfinite(end) or end <= start:
             raise ValueError("t_end must be finite and greater than t_start")
+        duration = self.exposure_duration_seconds
+        if duration is not None:
+            duration = float(duration)
+            if not np.isfinite(duration) or duration <= 0.0:
+                raise ValueError("exposure_duration_seconds must be finite and positive")
         if self.gain_electrons_per_adu <= 0.0:
             raise ValueError("gain_electrons_per_adu must be positive")
         if self.read_noise_electrons < 0.0 or self.saturation_electrons <= 0.0:
@@ -101,6 +110,7 @@ class RealExposureParent:
 
         object.__setattr__(self, "t_start_bjd_tdb", start)
         object.__setattr__(self, "t_end_bjd_tdb", end)
+        object.__setattr__(self, "exposure_duration_seconds", duration)
         object.__setattr__(self, "angular_size_arcsec", angular_size)
         object.__setattr__(self, "science", science)
         object.__setattr__(self, "uncertainty", uncertainty)
@@ -116,6 +126,8 @@ class RealExposureParent:
 
     @property
     def exposure_seconds(self) -> float:
+        if self.exposure_duration_seconds is not None:
+            return self.exposure_duration_seconds
         return (self.t_end_bjd_tdb - self.t_start_bjd_tdb) * 86400.0
 
 
