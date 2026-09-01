@@ -123,10 +123,19 @@ class AstroMambaHConfig:
     # during memory-constrained sequence training when the structured heads
     # are the active objective.
     decode_heatmaps: bool = True
+    # Kepler target-pixel files are compact detector cutouts.  This explicit
+    # mode keeps their native pixels (the data adapter pads only) while
+    # preserving the default HST 720x1280 contract.
+    allow_compact_input: bool = False
 
     def __post_init__(self) -> None:
-        if (self.input_height, self.input_width) != (720, 1280):
-            raise ValueError("AstroMamba-H requires a 720x1280 input raster")
+        if self.allow_compact_input:
+            if self.input_height < 32 or self.input_width < 32:
+                raise ValueError("compact AstroMamba-H inputs must be at least 32x32")
+            if self.input_height % 32 or self.input_width % 32:
+                raise ValueError("compact AstroMamba-H inputs must be divisible by 32")
+        elif (self.input_height, self.input_width) != (720, 1280):
+            raise ValueError("AstroMamba-H requires a 720x1280 input raster unless compact mode is enabled")
         if self.heatmap_stride != 8:
             raise ValueError("the scaffold currently exposes an /8 heatmap grid")
         if len(self.stage_channels) != 4 or any(c < 1 for c in self.stage_channels):
@@ -183,7 +192,14 @@ class AstroMambaHConfig:
     def spatial_resolutions(self) -> Tuple[Tuple[int, int], ...]:
         """Feature resolutions in (height, width), matching SPEC.md."""
 
-        return ((180, 320), (180, 320), (90, 160), (45, 80), (23, 40))
+        height, width = self.input_size
+        return (
+            (height // 4, width // 4),
+            (height // 4, width // 4),
+            (height // 8, width // 8),
+            (height // 16, width // 16),
+            ((height + 31) // 32, (width + 31) // 32),
+        )
 
     @property
     def heatmap_size(self) -> Tuple[int, int]:
@@ -221,7 +237,7 @@ class AstroMambaHInputs:
             raise ValueError("raster must have shape [B,V,S,C,720,1280]")
         b, visits, steps, channels, height, width = self.raster.shape
         if (height, width) != config.input_size:
-            raise ValueError("raster must have spatial size 720x1280")
+            raise ValueError(f"raster must have spatial size {config.input_height}x{config.input_width}")
         if channels != config.raster_channels:
             raise ValueError(f"raster has {channels} channels, expected {config.raster_channels}")
 

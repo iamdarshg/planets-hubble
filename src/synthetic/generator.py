@@ -27,6 +27,7 @@ class SyntheticGenerator:
         "interpolation_mask",
         "exposure_coverage_fraction",
     )
+    SPEED_OF_LIGHT_MPS = 299_792_458.0
     WAVELENGTH_FEATURES = (
         "normalized_log_wavelength",
         "physical_ratio_flux",
@@ -47,11 +48,20 @@ class SyntheticGenerator:
         starts, mids, ends = self._schedule(rng)
         exposure_days = config.exposure_seconds / 86400.0
         wavelengths = np.asarray(config.wavelength_nm, dtype=np.float64)
-        wavelength_coordinate = self._normalize_log_wavelength(wavelengths)
+        rest_wavelength_coordinate = self._normalize_log_wavelength(wavelengths)
         valid_exposure, interpolation, wavelength_mask = self._masks(rng)
 
+        field_stars = self._field_stars(rng)
+        brightness_factors, brightness_scales = self._stellar_brightness_factors(rng)
+        field_stars["brightness_factors"] = brightness_factors
+        field_stars["brightness_noise_scales"] = brightness_scales
         latent_null, latent_injected, event_mask, depth = self._latent_signals(
             mids, starts, ends, wavelengths
+        )
+        relativity_terms, relativity_metadata = self._relativity_terms(mids)
+        log_wavelength_span = max(float(np.ptp(np.log10(wavelengths))), 1e-12)
+        observed_wavelength_coordinate = rest_wavelength_coordinate[None, None, :] + (
+            np.log10(relativity_terms["doppler_factor"])[..., None] / log_wavelength_span
         )
         nuisance_layers = self._nuisance_layers(rng, mids, starts, ends)
         noisy_null, noisy_injected, uncertainty = self._apply_noise(
@@ -76,6 +86,7 @@ class SyntheticGenerator:
             wavelength_mask,
             pixel_noise,
             nuisance_layers,
+            field_stars,
         )
         injected_raster = self._render_raster(
             noisy_injected,
@@ -85,14 +96,20 @@ class SyntheticGenerator:
             wavelength_mask,
             pixel_noise,
             nuisance_layers,
+            field_stars,
         )
         null_tokens = self._wavelength_tokens(
-            noisy_null, uncertainty, wavelength_coordinate, valid_exposure, interpolation, wavelength_mask
+            noisy_null,
+            uncertainty,
+            observed_wavelength_coordinate,
+            valid_exposure,
+            interpolation,
+            wavelength_mask,
         )
         injected_tokens = self._wavelength_tokens(
             noisy_injected,
             uncertainty,
-            wavelength_coordinate,
+            observed_wavelength_coordinate,
             valid_exposure,
             interpolation,
             wavelength_mask,
@@ -112,7 +129,7 @@ class SyntheticGenerator:
             injection_seed=config.seed,
             mids=mids,
         )
-        objects, object_mask, object_metadata = self._objects()
+        objects, object_mask, object_metadata = self._objects(field_stars)
         geometry, coverage, local_time, long_time = self._context(
             starts, mids, ends, valid_exposure, interpolation, wavelength_mask
         )
@@ -129,8 +146,28 @@ class SyntheticGenerator:
             "parent_conditioned": False,
             "nuisance_labels_explicit": True,
             "time_system": "BJD_TDB",
+            "field_star_count": len(field_stars["positions"]),
+            "target_star_index": 0,
+            "stellar_brightness_model": "independent per-star AR(1) frame noise shared by null/injected pair",
+            "stellar_brightness_noise_sigma": config.stellar_brightness_noise_sigma,
+            "stellar_brightness_ar1": config.stellar_brightness_ar1,
+            "stellar_brightness_amplitude_scatter": config.stellar_brightness_amplitude_scatter,
+            "stellar_brightness_factor_std": float(np.std(field_stars["brightness_factors"])),
+            "stellar_brightness_factor_min": float(np.min(field_stars["brightness_factors"])),
+            "stellar_brightness_factor_max": float(np.max(field_stars["brightness_factors"])),
+            "stellar_brightness_noise_scale_min": float(np.min(field_stars["brightness_noise_scales"])),
+            "stellar_brightness_noise_scale_max": float(np.max(field_stars["brightness_noise_scales"])),
+            "field_stars": [
+                {
+                    "star_index": int(index),
+                    "x": float(position[0]),
+                    "y": float(position[1]),
+                    "flux_ratio": float(field_stars["flux_ratios"][index]),
+                    "has_exoplanet": bool(field_stars["planet_hosts"][index]),
+                }
+                for index, position in enumerate(field_stars["positions"])
+            ],
         }
-        relativity_terms, relativity_metadata = self._relativity_terms(mids)
         return SyntheticBundle(
             null=ObservationView(null_raster, null_tokens, wavelength_mask.copy(), null_labels),
             injected=ObservationView(
@@ -376,12 +413,12 @@ class SyntheticGenerator:
         wavelength_mask: np.ndarray,
         pixel_noise: np.ndarray,
         nuisance_layers: dict[str, np.ndarray] | None = None,
+        field_stars: dict[str, np.ndarray] | None = None,
     ) -> np.ndarray:
         config = self.config
         height, width = config.raster_height, config.raster_width
         y, x = np.mgrid[0:height, 0:width]
-        center_x = config.source_x * (width - 1)
-        center_y = config.source_y * (height - 1)
+        stars = field_stars or self._field_stars(np.random.default_rng(config.seed))
         layers = nuisance_layers or {}
         focus = layers.get("hst_focus_psf", np.zeros(measurements.shape[:2]))
         jitter = layers.get(
@@ -397,16 +434,57 @@ class SyntheticGenerator:
         sigma = np.maximum(1.3 * (1.0 + focus), 0.25)
         field_center_x = 0.5 * (width - 1)
         field_center_y = 0.5 * (height - 1)
-        source_offset_x = center_x - field_center_x
-        source_offset_y = center_y - field_center_y
         theta = np.deg2rad(roll)
-        rolled_source_x = field_center_x + np.cos(theta) * source_offset_x - np.sin(theta) * source_offset_y
-        rolled_source_y = field_center_y + np.sin(theta) * source_offset_x + np.cos(theta) * source_offset_y
-        shifted_x = x[None, None] - rolled_source_x[..., None, None] - jitter[..., 0, None, None] - drift[..., 0, None, None]
-        shifted_y = y[None, None] - rolled_source_y[..., None, None] - jitter[..., 1, None, None] - drift[..., 1, None, None]
-        psf = np.exp(-0.5 * ((shifted_x / sigma[..., None, None]) ** 2 + (shifted_y / sigma[..., None, None]) ** 2))
-        psf /= np.maximum(psf.max(axis=(-1, -2), keepdims=True), 1e-8)
-        baseline = 1.0 + config.source_contrast * psf
+        positions = np.asarray(stars["positions"], dtype=np.float64)
+        source_offset_x = positions[:, 0] * (width - 1) - field_center_x
+        source_offset_y = positions[:, 1] * (height - 1) - field_center_y
+        rolled_source_x = (
+            field_center_x
+            + np.cos(theta)[..., None] * source_offset_x[None, None, :]
+            - np.sin(theta)[..., None] * source_offset_y[None, None, :]
+        )
+        rolled_source_y = (
+            field_center_y
+            + np.sin(theta)[..., None] * source_offset_x[None, None, :]
+            + np.cos(theta)[..., None] * source_offset_y[None, None, :]
+        )
+        shifted_x = (
+            x[None, None, None]
+            - rolled_source_x[..., None, None]
+            - jitter[..., None, 0, None, None]
+            - drift[..., None, 0, None, None]
+        )
+        shifted_y = (
+            y[None, None, None]
+            - rolled_source_y[..., None, None]
+            - jitter[..., None, 1, None, None]
+            - drift[..., None, 1, None, None]
+        )
+        star_psf = np.exp(
+            -0.5
+            * (
+                (shifted_x / sigma[..., None, None, None]) ** 2
+                + (shifted_y / sigma[..., None, None, None]) ** 2
+            )
+        )
+        star_psf /= np.maximum(star_psf.max(axis=(-1, -2), keepdims=True), 1e-8)
+        brightness_factors = np.asarray(
+            stars.get(
+                "brightness_factors",
+                np.ones((*measurements.shape[:2], len(stars["positions"])), dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        if brightness_factors.shape != (*measurements.shape[:2], len(stars["positions"])):
+            raise ValueError(
+                "brightness_factors must be [visits, local_steps, field_star_count], "
+                f"got {brightness_factors.shape}"
+            )
+        weighted_flux_ratios = brightness_factors * np.asarray(stars["flux_ratios"], dtype=np.float32)[None, None, :]
+        field_psf = np.einsum("vls,vlshw->vlhw", weighted_flux_ratios, star_psf)
+        target_psf = star_psf[:, :, 0]
+        target_brightness = brightness_factors[..., 0]
+        baseline = 1.0 + config.source_contrast * field_psf
         scalar = measurements.mean(axis=-1)
         scalar_uncertainty = uncertainty.mean(axis=-1)
         spatial = layers.get("pixel_area_map", np.zeros((height, width), dtype=np.float64))[None, None]
@@ -414,9 +492,13 @@ class SyntheticGenerator:
             "radiation_hot_pixels", np.zeros_like(pixel_noise)
         ) + layers.get("cosmic_ray", np.zeros_like(pixel_noise))
         geometric = layers.get("geometric_distortion", np.zeros(measurements.shape[:2]))
+        field_measurement = (
+            target_psf * (scalar * target_brightness)[..., None, None]
+            + (field_psf - target_psf * target_brightness[..., None, None])
+        )
         physical = (
             1.0
-            + config.source_contrast * psf * scalar[..., None, None]
+            + config.source_contrast * field_measurement
             + pixel_noise
             + spatial
             + geometric[..., None, None]
@@ -546,6 +628,21 @@ class SyntheticGenerator:
         self, mids: np.ndarray
     ) -> tuple[dict[str, np.ndarray], dict[str, object]]:
         config = self.config
+        orbital_velocity = config.orbital_radial_velocity_amplitude_mps * np.sin(
+            2.0 * np.pi * (mids - config.start_bjd_tdb) / config.orbital_radial_velocity_period_days
+            + config.orbital_radial_velocity_phase_rad
+        )
+        radial_velocity = (
+            config.stellar_radial_velocity_mps
+            + config.barycentric_radial_velocity_mps
+            + config.gravitational_redshift_mps
+            + orbital_velocity
+        ).astype(np.float64)
+        beta = np.clip(radial_velocity / self.SPEED_OF_LIGHT_MPS, -0.999999, 0.999999)
+        # Relativistic longitudinal Doppler factor. Positive radial velocity
+        # is receding/redshifted; this is an analytic spectral-coordinate
+        # transform, not a claim of full radiative-transfer modelling.
+        doppler_factor = np.sqrt((1.0 + beta) / (1.0 - beta)).astype(np.float32)
         return (
             {
                 "barycentric_tdb_offset_seconds": np.full(
@@ -558,12 +655,18 @@ class SyntheticGenerator:
                     np.array([config.apparent_position_shift_arcsec, 0.0], dtype=np.float32),
                     (*mids.shape, 2),
                 ).copy(),
+                "radial_velocity_mps": radial_velocity.astype(np.float32),
+                "orbital_radial_velocity_mps": orbital_velocity.astype(np.float32),
+                "doppler_factor": doppler_factor,
+                "doppler_shift_fraction": (doppler_factor - 1.0).astype(np.float32),
             },
             {
                 "time_system": "BJD_TDB",
-                "implementation": "constant_analytic_terms",
+                "implementation": "analytic_barycentric_light_time_position_and_relativistic_doppler_terms",
                 "detector_losses_are_relativistic": False,
-                "scope": "metadata_and_schedule_hook_only",
+                "doppler_applied_to": "wavelength_token_coordinate",
+                "radial_velocity_sign": "positive_is_receding_redshift",
+                "scope": "bounded_pretraining_approximation_requires_real_data_calibration",
             },
         )
 
@@ -636,24 +739,126 @@ class SyntheticGenerator:
         tokens[~wavelength_mask] = 0.0
         return tokens
 
-    def _objects(self) -> tuple[np.ndarray, np.ndarray, tuple[dict[str, object], ...]]:
+    def _field_stars(self, rng: np.random.Generator) -> dict[str, np.ndarray]:
+        """Create a deterministic multi-star field with an explicit target.
+
+        Star zero is always the configured target.  The other sources are
+        sampled away from it and receive independent brightness and planet
+        host priors.  The null/injected views reuse this exact scene.
+        """
+
         config = self.config
-        objects = np.array(
-            [
-                [0.0, 0.0, 0.0, 0.02, 1.0, 0.0, 0.01, 0.2, 0.0, 0.0, 1.0, 0.0],
-                [0.18, -0.12, 0.22, 0.04, 0.45, 0.2, 0.02, 0.4, 0.01, 0.1, 0.6, 0.0],
-                [-0.31, 0.21, 0.37, 0.08, 0.22, -0.1, 0.04, 0.7, 0.02, -0.2, 0.3, 0.0],
+        positions = [(float(config.source_x), float(config.source_y))]
+        minimum = config.field_star_min_separation_pixels / max(
+            config.raster_width - 1, config.raster_height - 1, 1
+        )
+        attempts = 0
+        while len(positions) < config.field_star_count and attempts < 500:
+            attempts += 1
+            candidate = tuple(float(value) for value in rng.uniform(0.06, 0.94, size=2))
+            if all(np.hypot(candidate[0] - x0, candidate[1] - y0) >= minimum for x0, y0 in positions):
+                positions.append(candidate)
+        while len(positions) < config.field_star_count:
+            # Extremely crowded compact scenes still get a valid bounded
+            # field; the normal rejection path handles ordinary settings.
+            positions.append(tuple(float(value) for value in rng.uniform(0.06, 0.94, size=2)))
+        flux_ratios = np.asarray(
+            [1.0]
+            + [
+                float(rng.uniform(config.field_star_flux_ratio_min, config.field_star_flux_ratio_max))
+                for _ in range(config.field_star_count - 1)
             ],
             dtype=np.float32,
         )
-        objects[0, 0] = config.source_x
-        objects[0, 1] = config.source_y
+        planet_hosts = np.asarray(
+            [True]
+            + [
+                bool(rng.random() < config.field_planet_probability)
+                for _ in range(config.field_star_count - 1)
+            ],
+            dtype=bool,
+        )
+        return {
+            "positions": np.asarray(positions, dtype=np.float32),
+            "flux_ratios": flux_ratios,
+            "planet_hosts": planet_hosts,
+        }
+
+    def _stellar_brightness_factors(self, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+        """Generate correlated brightness factors for a quiet-to-active star population."""
+
+        config = self.config
+        factors = np.ones(
+            (config.visits, config.local_steps, config.field_star_count),
+            dtype=np.float32,
+        )
+        scales = np.ones(config.field_star_count, dtype=np.float32)
+        if config.stellar_brightness_noise_sigma == 0.0:
+            return factors, scales
+        scales = np.clip(
+            np.exp(rng.normal(0.0, config.stellar_brightness_amplitude_scatter, size=config.field_star_count)),
+            0.35,
+            3.0,
+        ).astype(np.float32)
+        for star_index in range(config.field_star_count):
+            state = 0.0
+            innovation_sigma = config.stellar_brightness_noise_sigma * float(scales[star_index])
+            for visit in range(config.visits):
+                for step in range(config.local_steps):
+                    state = (
+                        config.stellar_brightness_ar1 * state
+                        + rng.normal(0.0, innovation_sigma)
+                    )
+                    # Keep the nuisance bounded so a rare random walk cannot
+                    # create an unphysical negative or saturated star.
+                    factors[visit, step, star_index] = float(np.clip(1.0 + state, 0.5, 1.5))
+        return factors, scales
+
+    def _objects(self, field_stars: dict[str, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray, tuple[dict[str, object], ...]]:
+        config = self.config
+        stars = field_stars or self._field_stars(np.random.default_rng(config.seed))
+        positions = [tuple(position) for position in stars["positions"]]
+        flux_ratios = [float(value) for value in stars["flux_ratios"]]
+        planet_hosts = [bool(value) for value in stars["planet_hosts"]]
+        # Preserve the original three-token context contract for small/default
+        # bundles. These two entries are catalog-context tokens, not extra
+        # raster sources and are kept away from the target center.
+        context_positions = ((0.16, 0.82), (0.84, 0.18))
+        while len(positions) < 3:
+            positions.append(context_positions[len(positions) - 1])
+            flux_ratios.append(0.10 if len(positions) == 2 else 0.06)
+            planet_hosts.append(False)
+        objects = np.zeros((len(positions), 12), dtype=np.float32)
+        for index, (x0, y0) in enumerate(positions):
+            flux_ratio = flux_ratios[index]
+            objects[index] = np.array(
+                [
+                    x0,
+                    y0,
+                    flux_ratio,
+                    0.02 + 0.01 * index,
+                    flux_ratio,
+                    float(planet_hosts[index]),
+                    0.01 + 0.01 * index,
+                    0.2 + 0.05 * index,
+                    0.0,
+                    0.0,
+                    1.0,
+                    float(index == 0),
+                ],
+                dtype=np.float32,
+            )
         mask = np.ones((config.visits, objects.shape[0]), dtype=bool)
         tiled = np.broadcast_to(objects[None, ...], (config.visits, *objects.shape)).copy()
-        metadata = (
-            {"object_id": "synthetic-host-0001", "role": "target_host", "mass_solar": 1.0},
-            {"object_id": "synthetic-neighbor-0001", "role": "foreground_context", "mass_solar": 0.6},
-            {"object_id": "synthetic-neighbor-0002", "role": "background_context", "mass_solar": 0.3},
+        metadata = tuple(
+            {
+                "object_id": f"synthetic-star-{index:04d}",
+                "role": "target_host" if index == 0 else "field_star",
+                "mass_solar": float(max(0.2, flux_ratio ** 0.25)),
+                "flux_ratio": float(flux_ratio),
+                "has_exoplanet": bool(planet_hosts[index]),
+            }
+            for index, flux_ratio in enumerate(flux_ratios)
         )
         return tiled, mask, metadata
 

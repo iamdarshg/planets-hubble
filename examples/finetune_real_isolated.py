@@ -53,6 +53,11 @@ def main() -> int:
         action="store_true",
         help="use one shared positive/null optimizer step per iteration",
     )
+    parser.add_argument(
+        "--cudnn-off",
+        action="store_true",
+        help="disable cuDNN workspace allocation in each isolated worker",
+    )
     args = parser.parse_args()
     if args.steps < 1 or args.exposures < 1:
         raise ValueError("steps and exposures must be positive")
@@ -102,6 +107,8 @@ def main() -> int:
                 worker_args.append("--skip-dense-heatmaps")
             if args.sequence_summary:
                 worker_args.append("--sequence-summary")
+            if args.cudnn_off:
+                worker_args.append("--cudnn-off")
             completed = subprocess.run(
                 worker_args,
                 check=False,

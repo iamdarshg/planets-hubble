@@ -41,6 +41,36 @@ def test_same_seed_reproduces_entire_paired_bundle() -> None:
     assert first.source_metadata["parent_conditioned"] is False
 
 
+def test_stellar_brightness_noise_is_enabled_bounded_and_reproducible() -> None:
+    config = small_config(
+        seed=23,
+        field_star_count=5,
+        stellar_brightness_noise_sigma=0.02,
+        stellar_brightness_amplitude_scatter=0.55,
+    )
+    first = SyntheticGenerator(config).generate()
+    second = SyntheticGenerator(config).generate()
+
+    assert first.source_metadata["stellar_brightness_model"].startswith("independent per-star")
+    assert first.source_metadata["stellar_brightness_factor_std"] > 0.0
+    assert first.source_metadata["stellar_brightness_noise_scale_min"] >= 0.35 - 1e-6
+    assert first.source_metadata["stellar_brightness_noise_scale_max"] <= 3.0 + 1e-6
+    assert 0.5 <= first.source_metadata["stellar_brightness_factor_min"] <= 1.0
+    assert 1.0 <= first.source_metadata["stellar_brightness_factor_max"] <= 1.5
+    assert first.source_metadata["stellar_brightness_factor_std"] == second.source_metadata["stellar_brightness_factor_std"]
+    np.testing.assert_array_equal(first.null.raster, second.null.raster)
+
+    quiet = SyntheticGenerator(
+        small_config(
+            seed=23,
+            field_star_count=5,
+            stellar_brightness_noise_sigma=0.0,
+            stellar_brightness_amplitude_scatter=0.55,
+        )
+    ).generate()
+    assert quiet.source_metadata["stellar_brightness_factor_std"] == 0.0
+
+
 def test_exposure_integrated_transit_has_expected_depth_and_timing() -> None:
     config = small_config(
         visits=1,

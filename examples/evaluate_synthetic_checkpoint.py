@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from contextlib import nullcontext
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -25,10 +26,18 @@ def main() -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=23)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--skip-dense-heatmaps",
+        action="store_true",
+        help="match the cap-safe decoder-off training configuration",
+    )
     args = parser.parse_args()
     device = resolve_device(args.device)
+    config = research_config()
+    if args.skip_dense_heatmaps:
+        config = replace(config, decode_heatmaps=False)
     with (torch.device(device) if device.type == "cuda" else nullcontext()):
-        model = AstroMambaHTrainingAdapter(config=research_config())
+        model = AstroMambaHTrainingAdapter(config=config)
     model = model.to(device, dtype=torch.bfloat16 if device.type == "cuda" else torch.float32)
     state = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state["model"] if "model" in state else state)

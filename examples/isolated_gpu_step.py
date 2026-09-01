@@ -114,6 +114,11 @@ def main() -> int:
         action="store_true",
         help="consume the full parent and reduce it to a cap-safe temporal summary",
     )
+    parser.add_argument(
+        "--cudnn-off",
+        action="store_true",
+        help="disable cuDNN workspace allocation to reduce host RSS",
+    )
     args = parser.parse_args()
     if args.event_only and args.source_event_curriculum:
         raise ValueError("event-only and source-event-curriculum are mutually exclusive")
@@ -121,6 +126,9 @@ def main() -> int:
         raise ValueError("learning-rate must be positive")
     if args.visits < 1 or args.local_steps < 1:
         raise ValueError("visits and local-steps must be positive")
+    if args.cudnn_off:
+        torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.benchmark = False
     device = resolve_worker_device(args.device)
     config = research_config()
     if args.skip_dense_heatmaps:

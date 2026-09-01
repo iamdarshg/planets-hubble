@@ -90,11 +90,18 @@ def test_relativistic_terms_are_separate_from_detector_nuisance_labels() -> None
         "barycentric_tdb_offset_seconds",
         "light_time_correction_seconds",
         "apparent_position_shift_arcsec",
+        "radial_velocity_mps",
+        "orbital_radial_velocity_mps",
+        "doppler_factor",
+        "doppler_shift_fraction",
     }
     assert bundle.relativity_metadata["time_system"] == "BJD_TDB"
-    assert bundle.relativity_metadata["implementation"] == "constant_analytic_terms"
+    assert bundle.relativity_metadata["implementation"] == (
+        "analytic_barycentric_light_time_position_and_relativistic_doppler_terms"
+    )
     assert bundle.relativity_metadata["detector_losses_are_relativistic"] is False
     assert np.all(np.isfinite(bundle.relativity_terms["barycentric_tdb_offset_seconds"]))
+    assert np.all(bundle.relativity_terms["doppler_factor"] > 0.0)
     assert bundle.relativity_terms["apparent_position_shift_arcsec"].shape[-1] == 2
 
 

@@ -44,9 +44,26 @@ class SyntheticConfig:
     source_x: float = 0.5
     source_y: float = 0.5
     source_contrast: float = 8.0
+    # A compact field of unresolved sources.  Star zero is the supervised
+    # target; additional stars are realistic spatial distractors and are
+    # represented in both the raster and object-token context.
+    field_star_count: int = 1
+    field_planet_probability: float = 0.0
+    field_star_flux_ratio_min: float = 0.03
+    field_star_flux_ratio_max: float = 0.30
+    field_star_min_separation_pixels: float = 3.0
     source_rate_per_second: float = 50000.0
     background_rate_per_second: float = 1000.0
     read_noise_electrons: float = 4.0
+    # Frame-to-frame stellar brightness variation applied to the resolved
+    # scene.  This is shared by the null/injected counterfactual pair, while
+    # each star receives an independent temporally correlated realization.
+    # The base innovation is intentionally stronger than detector shot noise:
+    # it represents unresolved stellar activity/flicker.  Per-star scatter
+    # below creates a quiet-to-active population rather than identical stars.
+    stellar_brightness_noise_sigma: float = 0.015
+    stellar_brightness_ar1: float = 0.72
+    stellar_brightness_amplitude_scatter: float = 0.55
     variability_sigma: float = 0.0015
     variability_ar1: float = 0.85
     invalid_fraction: float = 0.0
@@ -97,9 +114,21 @@ class SyntheticConfig:
     barycentric_tdb_offset_seconds: float = 0.0
     light_time_correction_seconds: float = 0.0
     apparent_position_shift_arcsec: float = 0.0
+    stellar_radial_velocity_mps: float = 0.0
+    barycentric_radial_velocity_mps: float = 0.0
+    gravitational_redshift_mps: float = 0.0
+    orbital_radial_velocity_amplitude_mps: float = 0.0
+    orbital_radial_velocity_period_days: float = 2.5
+    orbital_radial_velocity_phase_rad: float = 0.0
 
     def __post_init__(self) -> None:
-        positive_ints = (self.visits, self.local_steps, self.raster_height, self.raster_width)
+        positive_ints = (
+            self.visits,
+            self.local_steps,
+            self.raster_height,
+            self.raster_width,
+            self.field_star_count,
+        )
         if any(value < 1 for value in positive_ints):
             raise ValueError("visits, local_steps, and raster dimensions must be positive")
         if not self.wavelength_nm or any(value <= 0 for value in self.wavelength_nm):
@@ -120,14 +149,27 @@ class SyntheticConfig:
                 self.flare_decay_days,
                 self.binary_period_days,
                 self.binary_duration_hours,
-                self.binary_secondary_radius_ratio,
-            )
+            self.binary_secondary_radius_ratio,
+            self.orbital_radial_velocity_period_days,
+        )
         ):
             raise ValueError("physical scales must be positive")
         if self.spot_amplitude < 0.0 or self.flare_amplitude < 0.0:
             raise ValueError("spot and flare amplitudes must be non-negative")
+        if self.stellar_brightness_noise_sigma < 0.0:
+            raise ValueError("stellar_brightness_noise_sigma must be non-negative")
+        if not 0.0 <= self.stellar_brightness_ar1 < 1.0:
+            raise ValueError("stellar_brightness_ar1 must be in [0, 1)")
+        if self.stellar_brightness_amplitude_scatter < 0.0:
+            raise ValueError("stellar_brightness_amplitude_scatter must be non-negative")
         if self.binary_secondary_flux_ratio < 0.0:
             raise ValueError("binary_secondary_flux_ratio must be non-negative")
+        if not 0.0 <= self.field_planet_probability <= 1.0:
+            raise ValueError("field_planet_probability must be in [0, 1]")
+        if self.field_star_flux_ratio_min <= 0.0 or self.field_star_flux_ratio_max < self.field_star_flux_ratio_min:
+            raise ValueError("field star flux-ratio bounds must be positive and ordered")
+        if self.field_star_min_separation_pixels < 0.0:
+            raise ValueError("field_star_min_separation_pixels must be non-negative")
         nonnegative_nuisances = (
             self.hst_thermal_breathing_amplitude,
             self.hst_focus_psf_amplitude,
@@ -148,9 +190,17 @@ class SyntheticConfig:
             self.kepler_thermal_amplitude,
             self.kepler_impulsive_rate,
             self.cbv_common_mode_amplitude,
+            self.orbital_radial_velocity_amplitude_mps,
         )
         if any(value < 0.0 for value in nonnegative_nuisances):
             raise ValueError("nuisance amplitudes and rates must be non-negative")
+        for value in (
+            self.stellar_radial_velocity_mps,
+            self.barycentric_radial_velocity_mps,
+            self.gravitational_redshift_mps,
+        ):
+            if not np.isfinite(value):
+                raise ValueError("radial-velocity and gravitational-redshift terms must be finite")
         for rate in (
             self.radiation_hot_pixel_rate,
             self.cosmic_ray_rate,
