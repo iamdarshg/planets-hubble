@@ -176,9 +176,12 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
                 20.0,
             ),
             photometric_uncertainty,
-            temporal_score,
+            # Keep feature 4 as the generator's normalized bandwidth slot.
+            # The source-conditioned event branch consumes feature 6 for the
+            # robust cadence-level dip score in both synthetic and real data.
+            np.full(frames, 80.0 / 650.0, dtype=np.float32),
             np.full(frames, np.log10(max(cadence_seconds, 1.0)) / 5.0, dtype=np.float32),
-            np.ones(frames, dtype=np.float32),
+            temporal_score,
             quality_fraction,
         ),
         axis=-1,

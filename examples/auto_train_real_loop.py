@@ -115,7 +115,11 @@ def main() -> int:
         if not report_path.is_file():
             raise RuntimeError(f"training completed without report: {report_path}")
         report = json.loads(report_path.read_text(encoding="utf-8"))
-        validation = report.get("validation")
+        # train_kepler_real records per-epoch metrics under ``history``;
+        # retain the runner's validation-BCE selection rule without relying
+        # on a non-existent top-level ``validation`` field.
+        history_report = report.get("history")
+        validation = history_report[-1].get("validation") if isinstance(history_report, list) and history_report else None
         if not isinstance(validation, dict) or validation.get("mean_bce_loss") is None:
             raise RuntimeError(f"report has no validation BCE: {report_path}")
         validation_bce = float(validation["mean_bce_loss"])
