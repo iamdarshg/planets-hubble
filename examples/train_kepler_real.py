@@ -283,7 +283,10 @@ def _model_config():
         period_feature_dim=4,
         decoder_width=64,
         decoder_blocks=1,
-        spatial_chunk_size=1,
+        # Compact Kepler windows contain far fewer than 256 frames. Process
+        # the compact sequence as one spatial chunk to avoid the severe
+        # frame-by-frame CPU overhead of the full-frame setting.
+        spatial_chunk_size=256,
         decode_heatmaps=False,
     )
 
