@@ -26,7 +26,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
-CACHE_FORMAT_VERSION = 7
+CACHE_FORMAT_VERSION = 8
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
