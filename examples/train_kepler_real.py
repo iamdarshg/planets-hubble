@@ -494,6 +494,7 @@ def main() -> int:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     history: list[dict[str, object]] = []
+    best_validation_bce = float("inf")
     best_validation_accuracy = float("-inf")
     best_epoch = -1
     best_state_dict: dict[str, Tensor] | None = None
@@ -567,8 +568,11 @@ def main() -> int:
             "validation": validation_metrics,
         })
         validation_accuracy = validation_metrics.get("accuracy")
-        if isinstance(validation_accuracy, (int, float)) and validation_accuracy > best_validation_accuracy:
-            best_validation_accuracy = float(validation_accuracy)
+        validation_bce = validation_metrics.get("mean_bce_loss")
+        if isinstance(validation_bce, (int, float)) and validation_bce < best_validation_bce:
+            best_validation_bce = float(validation_bce)
+            if isinstance(validation_accuracy, (int, float)):
+                best_validation_accuracy = float(validation_accuracy)
             best_epoch = epoch
             # Keep the selected state on CPU so retaining the best epoch does
             # not add a second device-sized copy under the RSS cap.
@@ -603,8 +607,9 @@ def main() -> int:
             "synthetic_rehearsal_start_index": args.synthetic_rehearsal_start_index,
             "weight_decay": args.weight_decay,
             "best_epoch": best_epoch,
+            "best_validation_bce": best_validation_bce,
             "best_validation_accuracy": best_validation_accuracy,
-            "selection_metric": "validation_accuracy",
+            "selection_metric": "validation_mean_bce_loss",
         },
         temporary,
     )
@@ -633,8 +638,9 @@ def main() -> int:
         "unique_hosts": {name: len({int(record["kepid"]) for record in value}) for name, value in splits.items()},
         "history": history,
         "best_epoch": best_epoch,
+        "best_validation_bce": best_validation_bce,
         "best_validation_accuracy": best_validation_accuracy,
-        "selection_metric": "validation_accuracy",
+        "selection_metric": "validation_mean_bce_loss",
         "test": test_metrics,
         "peak_process_rss_bytes": peak_rss,
         "rss_cap_bytes": args.rss_cap_bytes,
