@@ -43,6 +43,11 @@ def main() -> int:
         action="store_true",
         help="Reinitialize the source-photometry event branch before each child epoch.",
     )
+    parser.add_argument(
+        "--train-only-temporal-summary",
+        action="store_true",
+        help="Freeze the representation and train only the temporal summary calibration head.",
+    )
     args = parser.parse_args()
     if args.max_epochs < 1 or args.patience < 1 or args.batch_size < 1 or args.launch_retries < 0:
         raise ValueError("max-epochs, patience, and batch-size must be positive; launch-retries cannot be negative")
@@ -97,6 +102,8 @@ def main() -> int:
         ]
         if args.reset_source_photometry_branch and iteration == 0:
             command.append("--reset-source-photometry-branch")
+        if args.train_only_temporal_summary:
+            command.append("--train-only-temporal-summary")
         print(json.dumps({"iteration": iteration + 1, "input_checkpoint": str(best_checkpoint), "command": command}), flush=True)
         completed = None
         for attempt in range(args.launch_retries + 1):

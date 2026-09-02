@@ -317,6 +317,15 @@ def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
         module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
 
 
+def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
+    """Train only the compact temporal evidence calibration head."""
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for parameter in model.core.temporal_summary_event.parameters():
+        parameter.requires_grad = True
+
+
 def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:
     model.eval()
     probabilities: list[float] = []
@@ -469,6 +478,11 @@ def main() -> int:
         action="store_true",
         help="reinitialize the source-conditioned 2-feature projection/event head after loading the checkpoint",
     )
+    parser.add_argument(
+        "--train-only-temporal-summary",
+        action="store_true",
+        help="freeze the representation and train only the compact temporal evidence calibration head",
+    )
     args = parser.parse_args()
     if args.batch_size < 1 or args.eval_batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
         raise ValueError("batch sizes, epochs, and learning-rate must be positive; weight-decay cannot be negative")
@@ -500,6 +514,8 @@ def main() -> int:
     model = _load_model(args.input_checkpoint, device)
     if args.reset_source_photometry_branch:
         _reset_source_photometry_branch(model)
+    if args.train_only_temporal_summary:
+        _freeze_except_temporal_summary(model)
     optimizers, optimizer_policy = _build_optimizers(
         model,
         name=args.optimizer,
@@ -660,6 +676,7 @@ def main() -> int:
             "best_validation_accuracy": best_validation_accuracy,
             "selection_metric": "validation_mean_bce_loss",
             "reset_source_photometry_branch": args.reset_source_photometry_branch,
+            "train_only_temporal_summary": args.train_only_temporal_summary,
         },
         temporary,
     )
