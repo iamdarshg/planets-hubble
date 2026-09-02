@@ -25,6 +25,7 @@ def main() -> int:
     parser.add_argument("--patience", type=int, default=3)
     parser.add_argument("--min-delta", type=float, default=5.0e-4)
     parser.add_argument("--target-validation-bce", type=float, default=0.20)
+    parser.add_argument("--launch-retries", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1.0e-5)
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
@@ -32,8 +33,8 @@ def main() -> int:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--rss-cap-bytes", type=int, default=1_200_000_000)
     args = parser.parse_args()
-    if args.max_epochs < 1 or args.patience < 1 or args.batch_size < 1:
-        raise ValueError("max-epochs, patience, and batch-size must be positive")
+    if args.max_epochs < 1 or args.patience < 1 or args.batch_size < 1 or args.launch_retries < 0:
+        raise ValueError("max-epochs, patience, and batch-size must be positive; launch-retries cannot be negative")
     if args.learning_rate <= 0.0 or args.weight_decay < 0.0:
         raise ValueError("learning-rate must be positive and weight-decay cannot be negative")
     if args.min_delta < 0.0 or args.target_validation_bce <= 0.0 or args.rss_cap_bytes < 1:
@@ -84,9 +85,32 @@ def main() -> int:
             str(args.rss_cap_bytes),
         ]
         print(json.dumps({"iteration": iteration + 1, "input_checkpoint": str(best_checkpoint), "command": command}), flush=True)
-        completed = subprocess.run(command, cwd=repo, check=False)
-        if completed.returncode != 0:
-            raise RuntimeError(f"real training iteration {iteration + 1} failed with exit code {completed.returncode}")
+        completed = None
+        for attempt in range(args.launch_retries + 1):
+            completed = subprocess.run(command, cwd=repo, check=False)
+            if completed.returncode == 0:
+                break
+            if attempt >= args.launch_retries:
+                raise RuntimeError(
+                    f"real training iteration {iteration + 1} failed with exit code {completed.returncode}"
+                )
+            delay = min(300, 30 * (2**attempt))
+            print(
+                json.dumps(
+                    {
+                        "iteration": iteration + 1,
+                        "attempt": attempt + 1,
+                        "status": "retrying_child_start",
+                        "exit_code": completed.returncode,
+                        "delay_seconds": delay,
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            time.sleep(delay)
+        if completed is None or completed.returncode != 0:
+            raise RuntimeError(f"real training iteration {iteration + 1} did not complete")
         report_path = output_checkpoint.with_suffix(".report.json")
         if not report_path.is_file():
             raise RuntimeError(f"training completed without report: {report_path}")
