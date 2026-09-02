@@ -26,7 +26,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
-CACHE_FORMAT_VERSION = 4
+CACHE_FORMAT_VERSION = 6
 
 
 def _config():
@@ -62,21 +62,32 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # required 32x32 canvas. This matches the real TPF adapter instead of
         # training on an unrealistically full-frame 32x32 scene.
         local_steps=16,
-        raster_height=8,
-        raster_width=8,
+        # Kepler TPF cutouts are predominantly 4x5 to 6x7, with a smaller
+        # tail of larger windows. A 6x6 compact field better matches the
+        # train/validation mean valid-pixel footprint than the former 8x8
+        # scene.
+        raster_height=6,
+        raster_width=6,
         wavelength_nm=(650.0,),
         wavelength_bandwidth_nm=80.0,
         exposure_seconds=1765.0,
+        source_contrast=20.0,
+        # Lower photon rate raises the normalized uncertainty into the range
+        # observed in the real adapter (roughly 0.005--0.025).
+        source_rate_per_second=0.5,
+        background_rate_per_second=1.0,
+        pixel_noise_sigma=0.008,
         field_star_count=5,
         field_planet_probability=0.30,
         field_star_flux_ratio_min=0.03,
         field_star_flux_ratio_max=0.30,
         field_star_min_separation_pixels=1.5,
-        stellar_brightness_noise_sigma=0.006,
+        stellar_brightness_noise_sigma=0.003,
         stellar_brightness_ar1=0.85,
         stellar_brightness_amplitude_scatter=0.55,
         local_step_spacing_days=0.0204,
         timestamp_jitter_days=0.0005,
+        interpolation_fraction=0.10,
         pointing_jitter_pixels=0.12,
         drift_pixels_per_visit=0.08,
         kepler_pointing_amplitude=0.001,
@@ -98,14 +109,18 @@ def _source_position(generator_config: SyntheticConfig, sample_index: int) -> tu
     """Choose a deterministic, non-central source location for one sample."""
 
     rng = np.random.default_rng(generator_config.seed * 1_000_003 + sample_index)
-    source_x, source_y = (float(value) for value in rng.uniform(0.14, 0.86, size=2))
-    if 0.42 <= source_x <= 0.58 and 0.42 <= source_y <= 0.58:
-        source_x = 0.22 if source_x < 0.5 else 0.78
+    # Empirical target centroids in real train/validation TPFs cluster around
+    # x=.60, y=.49 in their native cutouts, while retaining a non-central
+    # spread. Keep the draw bounded without a deterministic center case.
+    source_x, source_y = (
+        float(value)
+        for value in np.clip(rng.normal((0.60, 0.49), (0.09, 0.10)), 0.12, 0.88)
+    )
     return source_x, source_y
 
 
 def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dict[str, np.ndarray]:
-    """Place an 8x8 detector cutout on the model's fixed-size canvas."""
+    """Place a compact detector cutout on the model's fixed-size canvas."""
 
     raster = view["raster"]
     if raster.ndim != 6:
@@ -130,7 +145,7 @@ def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dic
     return embedded
 
 
-def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 8, canvas: int = 32) -> np.ndarray:
+def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 6, canvas: int = 32) -> np.ndarray:
     xy = np.asarray(source_xy, dtype=np.float32).copy()
     offset = (canvas - detector) // 2
     xy[:, 0] = (offset + xy[:, 0] * max(detector - 1, 1)) / max(canvas - 1, 1)
@@ -185,11 +200,31 @@ def _make_batch(
             )
             bundle = SyntheticGenerator(bundle_config).generate()
             for view, label in ((bundle.null, 0.0), (bundle.injected, 1.0)):
-                views.append(
-                    _embed_compact_view(
-                        bundle.as_model_numpy("null" if label == 0.0 else "injected")
-                    )
+                embedded = _embed_compact_view(
+                    bundle.as_model_numpy("null" if label == 0.0 else "injected")
                 )
+                # The real Kepler adapter exposes channel 4 as a good-quality
+                # mask, whereas the generator stores an interpolation mask.
+                # Convert the latter to the former at this adapter boundary so
+                # the model sees the same polarity in both domains.
+                raster = embedded["raster"]
+                valid = raster[:, :, :, 3] > 0.0
+                physical = 1.0 + raster[:, :, :, 0]
+                valid_values = np.where(valid, physical, np.nan)
+                baseline = np.nanmedian(valid_values, axis=(-1, -2), keepdims=True)
+                baseline = np.maximum(np.abs(baseline), 1.0)
+                normalized = np.clip(physical / baseline - 1.0, -20.0, 20.0)
+                centered = physical - baseline
+                robust_scale = np.nanmedian(np.abs(centered), axis=(-1, -2), keepdims=True) * 1.4826
+                uncertainty_scale = np.nanpercentile(
+                    np.where(valid, raster[:, :, :, 2], np.nan), 75, axis=(-1, -2), keepdims=True
+                )
+                scale = np.maximum(np.maximum(robust_scale, uncertainty_scale), 1.0)
+                raster[:, :, :, 0] = normalized
+                raster[:, :, :, 1] = np.clip(centered / scale, -20.0, 20.0)
+                raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
+                embedded["raster"] = raster
+                views.append(embedded)
                 labels.append(label)
                 source_positions.append((source_x, source_y))
         cached_arrays = {

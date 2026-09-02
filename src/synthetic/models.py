@@ -55,6 +55,7 @@ class SyntheticConfig:
     source_rate_per_second: float = 50000.0
     background_rate_per_second: float = 1000.0
     read_noise_electrons: float = 4.0
+    pixel_noise_sigma: float = 0.0002
     # Frame-to-frame stellar brightness variation applied to the resolved
     # scene.  This is shared by the null/injected counterfactual pair, while
     # each star receives an independent temporally correlated realization.
@@ -158,6 +159,8 @@ class SyntheticConfig:
             raise ValueError("spot and flare amplitudes must be non-negative")
         if self.stellar_brightness_noise_sigma < 0.0:
             raise ValueError("stellar_brightness_noise_sigma must be non-negative")
+        if not np.isfinite(self.pixel_noise_sigma) or self.pixel_noise_sigma < 0.0:
+            raise ValueError("pixel_noise_sigma must be finite and non-negative")
         if not 0.0 <= self.stellar_brightness_ar1 < 1.0:
             raise ValueError("stellar_brightness_ar1 must be in [0, 1)")
         if self.stellar_brightness_amplitude_scatter < 0.0:

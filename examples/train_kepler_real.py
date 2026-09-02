@@ -284,12 +284,21 @@ def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.
     model.eval()
     probabilities: list[float] = []
     labels: list[int] = []
+    losses: list[float] = []
     with torch.inference_mode():
         for batch_records in _batch_records(records, batch_size, seed=0, shuffle=False):
             batch = _make_batch(root, batch_records, device)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
-            values = output["global_event_logits"].float().sigmoid().reshape(-1).cpu().tolist()
+            logits = output["global_event_logits"].float().reshape(-1)
+            targets = batch.target.float().reshape(-1)
+            losses.extend(
+                float(value)
+                for value in F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+                .cpu()
+                .tolist()
+            )
+            values = logits.sigmoid().cpu().tolist()
             probabilities.extend(float(value) for value in values)
             labels.extend(int(record["label"]) for record in batch_records)
             del batch, output
@@ -303,6 +312,7 @@ def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.
         "samples": len(labels),
         "correct": correct,
         "accuracy": correct / len(labels) if labels else None,
+        "mean_bce_loss": sum(losses) / len(losses) if losses else None,
         "mean_probability": sum(probabilities) / len(probabilities) if probabilities else None,
         "true_positive": tp,
         "true_negative": tn,

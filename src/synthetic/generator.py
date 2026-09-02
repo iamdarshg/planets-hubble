@@ -79,7 +79,7 @@ class SyntheticGenerator:
         )
         pixel_noise = rng.normal(
             0.0,
-            0.0002,
+            config.pixel_noise_sigma,
             size=(
                 config.visits,
                 config.local_steps,
