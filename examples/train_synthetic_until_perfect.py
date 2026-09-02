@@ -353,6 +353,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument(
+        "--stop-holdout-errors",
+        type=int,
+        help="finish successfully after an epoch at or below this holdout error count",
+    )
+    parser.add_argument(
         "--rss-cap-bytes",
         type=int,
         default=RSS_CAP_BYTES,
@@ -363,6 +368,8 @@ def main() -> int:
         raise ValueError("pair counts, batch-pairs, and max-epochs must be positive")
     if args.rss_cap_bytes < 1:
         raise ValueError("rss-cap-bytes must be positive")
+    if args.stop_holdout_errors is not None and args.stop_holdout_errors < 0:
+        raise ValueError("stop-holdout-errors must be non-negative")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -480,7 +487,10 @@ def main() -> int:
             epoch_temporary,
         )
         os.replace(epoch_temporary, epoch_checkpoint)
-        if final_training["errors"] == 0:
+        if final_training["errors"] == 0 or (
+            args.stop_holdout_errors is not None
+            and final_holdout["errors"] <= args.stop_holdout_errors
+        ):
             break
     if final_holdout is None or final_training is None:
         raise RuntimeError("no synthetic epoch completed")
@@ -540,6 +550,7 @@ def main() -> int:
         "device": str(device),
         "batch_pairs": args.batch_pairs,
         "max_epochs": args.max_epochs,
+        "stop_holdout_errors": args.stop_holdout_errors,
         "global_steps": global_step,
         "rss_cap_bytes": args.rss_cap_bytes,
         "peak_process_rss_bytes": peak_rss,
