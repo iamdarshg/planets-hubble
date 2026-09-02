@@ -309,7 +309,9 @@ def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
     constant from biasing the newly aligned robust temporal signal.
     """
 
-    for module in (model.source_photometry_projection, model.source_photometry_event):
+    # AstroMambaHTrainingAdapter keeps the actual AstroMambaH module under
+    # ``core``; reset only the two source-photometry modules there.
+    for module in (model.core.source_photometry_projection, model.core.source_photometry_event):
         module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
 
 
