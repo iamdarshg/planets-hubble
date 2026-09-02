@@ -89,7 +89,7 @@ def main() -> int:
             "--rss-cap-bytes",
             str(args.rss_cap_bytes),
         ]
-        if args.reset_source_photometry_branch:
+        if args.reset_source_photometry_branch and iteration == 0:
             command.append("--reset-source-photometry-branch")
         print(json.dumps({"iteration": iteration + 1, "input_checkpoint": str(best_checkpoint), "command": command}), flush=True)
         completed = None
