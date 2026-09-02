@@ -69,6 +69,18 @@ def main() -> int:
     parser.add_argument("--catalog", type=Path, required=True)
     parser.add_argument("--primary-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--prior-manifest",
+        type=Path,
+        action="append",
+        default=[],
+        help="previous extension manifest(s) whose windows must be excluded and carried into the combined corpus",
+    )
+    parser.add_argument(
+        "--combined-dir",
+        type=Path,
+        help="destination for the combined corpus; defaults to the historical kepler-expanded-4000 path",
+    )
     parser.add_argument("--additional-pairs", type=int, default=1000)
     parser.add_argument("--frames", type=int, default=16)
     parser.add_argument(
@@ -99,6 +111,17 @@ def main() -> int:
         kepid = int(record["kepid"])
         primary_by_host.setdefault(kepid, record)
         existing_centres.setdefault(kepid, []).append(float(record["center_bkjd"]))
+
+    prior_manifests: list[tuple[Path, list[dict[str, object]]]] = []
+    for prior_manifest in args.prior_manifest:
+        prior_manifest = prior_manifest.resolve()
+        if not prior_manifest.is_file():
+            raise FileNotFoundError(prior_manifest)
+        prior_records = _read_jsonl(prior_manifest)
+        prior_manifests.append((prior_manifest.parent, prior_records))
+        for record in prior_records:
+            kepid = int(record["kepid"])
+            existing_centres.setdefault(kepid, []).append(float(record["center_bkjd"]))
 
     catalog_by_host = {int(row["kepid"]): row for row in _catalog_rows(args.catalog)}
     raw_files: list[tuple[int, Path]] = []
@@ -227,14 +250,18 @@ def main() -> int:
         for record in records:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
-    combined_dir = args.output_dir.parent / "kepler-expanded-4000"
+    combined_dir = (args.combined_dir or args.output_dir.parent / "kepler-expanded-4000").resolve()
     combined_dir.mkdir(parents=True, exist_ok=True)
     combined_manifest = combined_dir / "corpus_manifest.jsonl"
     combined_records: list[dict[str, object]] = []
-    for record in primary_records + records:
+    source_records: list[tuple[Path, dict[str, object]]] = [
+        *((primary_dir, record) for record in primary_records),
+        *((source_root, record) for source_root, prior_records in prior_manifests for record in prior_records),
+        *((args.output_dir, record) for record in records),
+    ]
+    for source_root, record in source_records:
         copy = dict(record)
-        original_root = primary_dir if record in primary_records else args.output_dir
-        source_path = (original_root / str(record["path"])).resolve()
+        source_path = (source_root / str(record["path"])).resolve()
         copy["path"] = os.path.relpath(source_path, combined_dir)
         combined_records.append(copy)
     with combined_manifest.open("w", encoding="utf-8") as handle:
@@ -255,6 +282,7 @@ def main() -> int:
         "total_pairs": len(combined_records) // 2,
         "total_examples": len(combined_records),
         "primary_manifest": str(primary_manifest),
+        "prior_manifests": [str(path) for path, _ in prior_manifests],
         "extension_manifest": str(output_manifest),
         "combined_manifest": str(combined_manifest),
         "catalog": str(args.catalog),
