@@ -29,6 +29,18 @@ RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
 CACHE_FORMAT_VERSION = 7
 
 
+def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
+    """Match the real adapter's invariant cadence-level flux-dip feature."""
+
+    values = np.asarray(values, dtype=np.float32)
+    uncertainty = np.asarray(uncertainty, dtype=np.float32)
+    center = np.median(values, axis=(-1, -2), keepdims=True)
+    mad_scale = np.median(np.abs(values - center), axis=(-1, -2), keepdims=True) * 1.4826
+    scale = np.maximum(mad_scale, np.median(np.abs(uncertainty), axis=(-1, -2), keepdims=True))
+    scale = np.maximum(scale, 1.0e-5)
+    return np.clip((values - center) / scale, -20.0, 20.0).astype(np.float32)
+
+
 def _config():
     return AstroMambaHConfig(
         input_height=32,
@@ -207,6 +219,14 @@ def _make_batch(
                 # Convert the latter to the former at this adapter boundary so
                 # the model sees the same polarity in both domains.
                 raster = embedded["raster"]
+                wavelength_tokens = embedded["wavelength_tokens"]
+                cadence_values = wavelength_tokens[..., 1]
+                cadence_uncertainty = wavelength_tokens[..., 3]
+                wavelength_tokens[..., 6] = _robust_temporal_score(
+                    cadence_values,
+                    cadence_uncertainty,
+                )
+                embedded["wavelength_tokens"] = wavelength_tokens
                 raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
                 embedded["raster"] = raster
                 views.append(embedded)

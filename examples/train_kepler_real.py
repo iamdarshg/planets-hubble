@@ -107,6 +107,20 @@ def _normalize_frame_arrays(
     return normalized, residual, err, valid.astype(np.float32), quality_ok.astype(np.float32), photometry, photometric_uncertainty
 
 
+def _robust_temporal_score(photometry: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
+    """Expose a scale-invariant cadence-level dip feature.
+
+    The score is computed from the observed aperture sequence only. Using a
+    robust scale prevents a single cosmic-ray/outlier cadence from erasing a
+    shallow transit signature while preserving the sign of a flux dip.
+    """
+
+    center = float(np.median(photometry))
+    mad_scale = float(np.median(np.abs(photometry - center))) * 1.4826
+    scale = max(mad_scale, float(np.median(np.abs(uncertainty))), 1.0e-5)
+    return np.clip((photometry - center) / scale, -20.0, 20.0).astype(np.float32)
+
+
 def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) -> dict[str, np.ndarray | float | int | str]:
     with np.load(root / Path(str(record["path"])), allow_pickle=False) as arrays:
         science = np.asarray(arrays["science"], dtype=np.float32)
@@ -117,6 +131,7 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
     normalized, residual, err, valid, quality_ok, photometry, photometric_uncertainty = _normalize_frame_arrays(
         science, uncertainty, finite, quality, canvas=canvas
     )
+    temporal_score = _robust_temporal_score(photometry, photometric_uncertainty)
     frames, height, width = normalized.shape
     raster = np.zeros((frames, 6, canvas, canvas), dtype=np.float32)
     y0 = (canvas - height) // 2
@@ -161,7 +176,7 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
                 20.0,
             ),
             photometric_uncertainty,
-            np.full(frames, 1.0, dtype=np.float32),
+            temporal_score,
             np.full(frames, np.log10(max(cadence_seconds, 1.0)) / 5.0, dtype=np.float32),
             np.ones(frames, dtype=np.float32),
             quality_fraction,
