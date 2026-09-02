@@ -913,7 +913,14 @@ class AstroMambaH(nn.Module):
         wavelength_weights = inputs.wavelength_mask.unsqueeze(-1).to(inputs.wavelength_tokens.dtype)
         wavelength_present = inputs.wavelength_mask.any(dim=3)
         frame_mask = step_mask.reshape(frame_count)
-        source_photometry_values = inputs.wavelength_tokens[..., 1:3]
+        # Feed the source-conditioned photometry branch the ratio-like flux
+        # and the robust cadence-level temporal score. The latter is already
+        # computed from the observed sequence by each data adapter and keeps
+        # a short transit from being hidden behind a raw uncertainty scale.
+        source_photometry_values = torch.stack(
+            (inputs.wavelength_tokens[..., 1], inputs.wavelength_tokens[..., 6]),
+            dim=-1,
+        )
         source_photometry_values = (
             (source_photometry_values * wavelength_weights).sum(dim=3)
             / wavelength_weights.sum(dim=3).clamp_min(1.0)
