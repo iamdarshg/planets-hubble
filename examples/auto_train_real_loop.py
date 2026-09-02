@@ -32,6 +32,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--rss-cap-bytes", type=int, default=1_200_000_000)
+    parser.add_argument(
+        "--reset-source-photometry-branch",
+        action="store_true",
+        help="Reinitialize the source-photometry event branch before each child epoch.",
+    )
     args = parser.parse_args()
     if args.max_epochs < 1 or args.patience < 1 or args.batch_size < 1 or args.launch_retries < 0:
         raise ValueError("max-epochs, patience, and batch-size must be positive; launch-retries cannot be negative")
@@ -84,6 +89,8 @@ def main() -> int:
             "--rss-cap-bytes",
             str(args.rss_cap_bytes),
         ]
+        if args.reset_source_photometry_branch:
+            command.append("--reset-source-photometry-branch")
         print(json.dumps({"iteration": iteration + 1, "input_checkpoint": str(best_checkpoint), "command": command}), flush=True)
         completed = None
         for attempt in range(args.launch_retries + 1):
