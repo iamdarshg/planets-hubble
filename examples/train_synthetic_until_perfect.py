@@ -26,7 +26,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
-CACHE_FORMAT_VERSION = 6
+CACHE_FORMAT_VERSION = 7
 
 
 def _config():
@@ -62,16 +62,15 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # required 32x32 canvas. This matches the real TPF adapter instead of
         # training on an unrealistically full-frame 32x32 scene.
         local_steps=16,
-        # Kepler TPF cutouts are predominantly 4x5 to 6x7, with a smaller
-        # tail of larger windows. A 6x6 compact field better matches the
-        # train/validation mean valid-pixel footprint than the former 8x8
-        # scene.
-        raster_height=6,
-        raster_width=6,
+        # Retain the proven compact representation for this transition round;
+        # the real-data footprint is introduced through masks and coverage
+        # while the checkpoint adapts to the new nuisance statistics.
+        raster_height=8,
+        raster_width=8,
         wavelength_nm=(650.0,),
         wavelength_bandwidth_nm=80.0,
         exposure_seconds=1765.0,
-        source_contrast=20.0,
+        source_contrast=8.0,
         # Lower photon rate raises the normalized uncertainty into the range
         # observed in the real adapter (roughly 0.005--0.025).
         source_rate_per_second=0.5,
@@ -145,7 +144,7 @@ def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dic
     return embedded
 
 
-def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 6, canvas: int = 32) -> np.ndarray:
+def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 8, canvas: int = 32) -> np.ndarray:
     xy = np.asarray(source_xy, dtype=np.float32).copy()
     offset = (canvas - detector) // 2
     xy[:, 0] = (offset + xy[:, 0] * max(detector - 1, 1)) / max(canvas - 1, 1)
@@ -208,20 +207,6 @@ def _make_batch(
                 # Convert the latter to the former at this adapter boundary so
                 # the model sees the same polarity in both domains.
                 raster = embedded["raster"]
-                valid = raster[:, :, :, 3] > 0.0
-                physical = 1.0 + raster[:, :, :, 0]
-                valid_values = np.where(valid, physical, np.nan)
-                baseline = np.nanmedian(valid_values, axis=(-1, -2), keepdims=True)
-                baseline = np.maximum(np.abs(baseline), 1.0)
-                normalized = np.clip(physical / baseline - 1.0, -20.0, 20.0)
-                centered = physical - baseline
-                robust_scale = np.nanmedian(np.abs(centered), axis=(-1, -2), keepdims=True) * 1.4826
-                uncertainty_scale = np.nanpercentile(
-                    np.where(valid, raster[:, :, :, 2], np.nan), 75, axis=(-1, -2), keepdims=True
-                )
-                scale = np.maximum(np.maximum(robust_scale, uncertainty_scale), 1.0)
-                raster[:, :, :, 0] = normalized
-                raster[:, :, :, 1] = np.clip(centered / scale, -20.0, 20.0)
                 raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
                 embedded["raster"] = raster
                 views.append(embedded)
@@ -573,7 +558,7 @@ def main() -> int:
         "loss_mode": args.loss_mode,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
-        "source_position_policy": "deterministic_noncentral_uniform_0.14_0.86",
+        "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
         "cache_dir": str(cache_dir),
         "cache_enabled": True,
         "sample_index_first": args.start_index,
