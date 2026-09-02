@@ -37,7 +37,7 @@ from training.adapters import (  # noqa: E402
 from training.harness import event_only_loss_fn  # noqa: E402
 
 
-RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
+RSS_CAP_BYTES = 840_000_000
 
 
 def _records(manifest_path: Path) -> list[dict[str, object]]:
@@ -420,9 +420,12 @@ def main() -> int:
     parser.add_argument("--synthetic-cache-dir", type=Path)
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--rss-cap-bytes", type=int, default=RSS_CAP_BYTES)
     args = parser.parse_args()
     if args.batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
         raise ValueError("batch-size, epochs, and learning-rate must be positive; weight-decay cannot be negative")
+    if args.rss_cap_bytes < 1:
+        raise ValueError("rss-cap-bytes must be positive")
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
     if not 0.0 <= args.label_smoothing < 1.0:
@@ -527,6 +530,10 @@ def main() -> int:
                 rehearsal_losses.append(float(rehearsal_loss.detach().float().cpu()))
             global_step += 1
             peak_rss = max(peak_rss, _rss_bytes())
+            if peak_rss > args.rss_cap_bytes:
+                raise MemoryError(
+                    f"RSS cap exceeded at step {global_step}: {peak_rss} > {args.rss_cap_bytes}"
+                )
             del batch, output, loss, real_loss
             if args.synthetic_rehearsal_pairs:
                 del rehearsal_batch, rehearsal_output, rehearsal_loss
@@ -615,8 +622,8 @@ def main() -> int:
         "selection_metric": "validation_accuracy",
         "test": test_metrics,
         "peak_process_rss_bytes": peak_rss,
-        "rss_cap_bytes": RSS_CAP_BYTES,
-        "rss_within_cap": peak_rss <= RSS_CAP_BYTES,
+        "rss_cap_bytes": args.rss_cap_bytes,
+        "rss_within_cap": peak_rss <= args.rss_cap_bytes,
         "peak_gpu_memory_allocated_bytes": peak_gpu,
         "elapsed_seconds": time.time() - start_time,
     }
