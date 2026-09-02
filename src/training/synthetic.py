@@ -432,6 +432,13 @@ def iter_paired_synthetic_training_batches(
             inputs=inputs,
             target=targets,
             auxiliary_targets=auxiliary_targets,
+            metadata={
+                "sample_index": sample_index,
+                "pair_id": f"synthetic-{sample_index}",
+                "seed": int(config.seed),
+                "event_type": config.event_type,
+                "view_order": ("null", "injected"),
+            },
         )
 
 
@@ -736,6 +743,14 @@ def iter_parented_synthetic_training_batches(
                         source_top_k,
                     )
                 )[None].to(target_device),
+            },
+            metadata={
+                "sample_index": sample_index,
+                "pair_id": f"real-parent-{parent.observation_id}-{sample_index}",
+                "parent_id": parent.observation_id,
+                "target_id": parent.target_id,
+                "requested_event": requested_event,
+                "view": "injected" if sample_index % 2 == 0 else "null",
             },
         )
 

@@ -55,6 +55,7 @@ class PhaseReport:
     reports: tuple[EpochReport, ...]
     stopped_reason: str
     checkpoint: str | None = None
+    sample_descriptors: tuple[dict[str, object], ...] = ()
 
     @property
     def losses(self) -> tuple[float, ...]:
@@ -148,12 +149,17 @@ def train_synthetic_then_real(
     target_device = resolve_device(device)
     # AMP should reduce activation cost, not replace trainable master weights
     # with BF16. Direct BF16 SGD updates can quantize away small steps.
-    model = model.to(target_device)
+    # Keep FP32 master/trainable weights. AMP below is limited to forward and
+    # backward compute; callers cannot accidentally enter the unsafe direct
+    # BF16-weight update mode through this production lifecycle runner.
+    model = model.to(target_device, dtype=torch.float32)
     trainer = BoundedTrainer(
         model,
         config=TrainingConfig(
             device=target_device,
-            max_batches_per_epoch=1,
+            # Synthetic counterfactuals are split into two device-sized
+            # microbatches but must share one optimizer update.
+            max_batches_per_epoch=2,
             amp="auto",
             grad_clip_norm=1.0,
             # Adam's two moment buffers are unnecessary for the bounded
@@ -322,69 +328,94 @@ def _train_phase(
     start_index: int = 0,
 ) -> PhaseReport:
     reports: list[EpochReport] = []
+    sample_descriptors: list[dict[str, object]] = []
     consecutive = 0
+
+    # Construct one persistent iterator for the whole phase. Recreating a
+    # sample_count=1 iterator inside the loop resets its procedural index and
+    # silently replays one scene/parent. A persistent iterator makes the
+    # consumed sequence exactly start_index, start_index+1, ... and gives
+    # resume/chunked runs auditable sample identity.
+    if real_parents is None:
+        stream_kwargs: dict[str, Any] = {
+            "sample_count": max_steps,
+            # Keep the counterfactual pair on CPU. The runner splits it before
+            # BoundedTrainer moves a single view to CUDA.
+            "device": "cpu",
+            "start_index": start_index,
+        }
+        if _stream_supports_synthetic_cache(stream_factory):
+            stream_kwargs.update(
+                cache_dir=synthetic_cache_dir,
+                cache_size=synthetic_cache_size,
+            )
+        stream: Iterator[AstroMambaHTrainingBatch] = stream_factory(config, **stream_kwargs)
+    else:
+        stream = stream_factory(
+            real_parents,
+            sample_count=max_steps,
+            device=trainer.device,
+            start_index=start_index,
+        )
+
     for step in range(max_steps):
-        if real_parents is None:
-            stream_kwargs: dict[str, Any] = {
-                "sample_count": 1,
-                # Keep the counterfactual pair on CPU.  The runner splits it
-                # before BoundedTrainer moves a single view to CUDA; retaining
-                # a full paired GPU batch would defeat the memory bound.
-                "device": "cpu",
-            }
-            if _stream_supports_synthetic_cache(stream_factory):
-                stream_kwargs.update(
-                    cache_dir=synthetic_cache_dir,
-                    cache_size=synthetic_cache_size,
+        source_batch = next(stream)
+        step_batches = _split_batch(source_batch) if real_parents is None else [source_batch]
+        descriptor = dict(source_batch.metadata)
+        descriptor["phase_step"] = step
+        descriptor["optimizer_step_before"] = trainer.state.optimizer_steps
+        sample_descriptors.append(descriptor)
+
+        # For a paired synthetic item, both views contribute gradients before
+        # one optimizer step. This removes label-order bias without holding
+        # both full-resolution activation graphs at once.
+        report = trainer.train_epoch(
+            step_batches,
+            loss_fn=default_loss_fn,
+            accumulation_steps=len(step_batches),
+        )
+        reports.append(report)
+        print(
+            json.dumps(
+                {
+                    "phase": phase,
+                    "step": step,
+                    "sample_descriptor": descriptor,
+                    "samples_seen": trainer.state.samples_seen,
+                    "optimizer_steps": trainer.state.optimizer_steps,
+                    "loss": report.last_loss,
+                    "rss_within_cap": report.rss_within_cap,
+                    "peak_gpu_mb": round((report.peak_gpu_memory_bytes or 0) / 1e6, 1),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        if report.last_loss is not None and report.last_loss <= target_loss:
+            consecutive += 1
+            if (
+                consecutive >= target_patience
+                and (minimum_examples is None or trainer.state.samples_seen >= minimum_examples)
+            ):
+                return PhaseReport(
+                    phase,
+                    tuple(reports),
+                    "target_loss_reached",
+                    sample_descriptors=tuple(sample_descriptors),
                 )
-            stream_kwargs["start_index"] = start_index
-            stream: Iterator[AstroMambaHTrainingBatch] = stream_factory(
-                config,
-                **stream_kwargs,
-            )
-            pair_batch = next(stream)
-            step_batches = _split_batch(pair_batch)
         else:
-            step_batches = [next(stream_factory(
-                real_parents,
-                sample_count=1,
-                device=trainer.device,
-            ))]
-        for batch in step_batches:
-            report = trainer.train_epoch([batch], loss_fn=default_loss_fn)
-            reports.append(report)
-            print(
-                json.dumps(
-                    {
-                        "phase": phase,
-                        "step": step,
-                        "samples_seen": trainer.state.samples_seen,
-                        "optimizer_steps": trainer.state.optimizer_steps,
-                        "loss": report.last_loss,
-                        "rss_within_cap": report.rss_within_cap,
-                        "peak_gpu_mb": round((report.peak_gpu_memory_bytes or 0) / 1e6, 1),
-                    },
-                    sort_keys=True,
-                ),
-                flush=True,
-            )
-            if report.last_loss is not None and report.last_loss <= target_loss:
-                consecutive += 1
-                if (
-                    consecutive >= target_patience
-                    and (minimum_examples is None or trainer.state.samples_seen >= minimum_examples)
-                ):
-                    return PhaseReport(phase, tuple(reports), "target_loss_reached")
-            else:
-                consecutive = 0
-            if trainer.device.type == "cuda":
-                del batch
-                gc.collect()
-                torch.cuda.synchronize(trainer.device)
-                torch.cuda.empty_cache()
-        if real_parents is None:
-            del pair_batch, step_batches, stream
-    return PhaseReport(phase, tuple(reports), "step_budget_exhausted")
+            consecutive = 0
+        if trainer.device.type == "cuda":
+            del source_batch, step_batches
+            gc.collect()
+            torch.cuda.synchronize(trainer.device)
+            torch.cuda.empty_cache()
+    return PhaseReport(
+        phase,
+        tuple(reports),
+        "step_budget_exhausted",
+        sample_descriptors=tuple(sample_descriptors),
+    )
 
 
 def _split_batch(batch: AstroMambaHTrainingBatch) -> list[AstroMambaHTrainingBatch]:
@@ -419,6 +450,7 @@ def _split_batch(batch: AstroMambaHTrainingBatch) -> list[AstroMambaHTrainingBat
                     name: value[index:index + 1]
                     for name, value in batch.auxiliary_targets.items()
                 },
+                metadata={**batch.metadata, "view_index": index},
             )
         )
     return result
@@ -515,6 +547,10 @@ def _save_checkpoint(
             "model": trainer.model.state_dict(),
             "training_state": trainer.state.__dict__,
             "parameter_count": sum(parameter.numel() for parameter in trainer.model.parameters()),
+            "optimizer_policy": "SGD_FP32_master_weights",
+            "parameter_dtypes": sorted({str(parameter.dtype) for parameter in trainer.model.parameters()}),
+            "amp_enabled": trainer.amp_enabled,
+            "amp_dtype": str(trainer.amp_dtype).replace("torch.", "") if trainer.amp_dtype else None,
         },
         path,
     )

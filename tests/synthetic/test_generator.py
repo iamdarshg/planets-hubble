@@ -109,6 +109,30 @@ def test_masks_and_normalized_views_preserve_missingness() -> None:
     assert np.all(np.isfinite(bundle.injected.wavelength_tokens))
 
 
+def test_single_band_and_detector_channels_remain_in_realistic_finite_range() -> None:
+    bundle = SyntheticGenerator(
+        small_config(
+            visits=1,
+            local_steps=16,
+            raster_height=8,
+            raster_width=8,
+            wavelength_nm=(650.0,),
+            stellar_radial_velocity_mps=20_000.0,
+            barycentric_radial_velocity_mps=29_000.0,
+        )
+    ).generate()
+
+    for view in (bundle.null, bundle.injected):
+        assert np.all(np.isfinite(view.raster))
+        assert np.all(np.isfinite(view.wavelength_tokens))
+        assert float(np.max(np.abs(view.raster[..., :3]))) <= 20.0
+        assert float(np.max(np.abs(view.wavelength_tokens[..., :3]))) <= 20.0
+        assert float(np.max(view.wavelength_tokens[..., 4])) < 1.0
+    # A single band cannot resolve a Doppler displacement, so its coordinate
+    # must stay finite and bounded rather than dividing by zero span.
+    assert float(np.max(np.abs(bundle.injected.wavelength_tokens[..., 0]))) <= 1.0
+
+
 def test_null_and_injected_pair_share_schedule_and_differ_only_by_signal_path() -> None:
     bundle = SyntheticGenerator(small_config()).generate()
 

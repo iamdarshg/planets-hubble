@@ -159,6 +159,7 @@ class AstroMambaHTrainingBatch:
     inputs: AstroMambaHInputs
     target: Tensor
     auxiliary_targets: Mapping[str, Tensor] = field(default_factory=dict)
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     @property
     def batch_size(self) -> int:
@@ -191,6 +192,7 @@ class AstroMambaHTrainingBatch:
             inputs=AstroMambaHInputs(**values),
             target=self.target.to(device),
             auxiliary_targets={name: value.to(device) for name, value in self.auxiliary_targets.items()},
+            metadata=self.metadata,
         )
 
 

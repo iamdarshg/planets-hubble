@@ -1001,10 +1001,33 @@ class AstroMambaH(nn.Module):
         photometry_weights = (wavelength_present & step_mask).unsqueeze(-1).to(
             source_photometry_event_logits.dtype
         )
-        source_photometry_event_logits = (
+        raw_photometry_count = photometry_weights.sum(dim=(1, 2))
+        photometry_present = raw_photometry_count > 0
+        photometry_count = raw_photometry_count.clamp_min(1.0)
+        photometry_mean = (
             (source_photometry_event_logits * photometry_weights).sum(dim=(1, 2))
-            / photometry_weights.sum(dim=(1, 2)).clamp_min(1.0)
+            / photometry_count
         )
+        # A transit can occupy only a few cadences.  A plain temporal mean
+        # dilutes that evidence and makes the direct photometry branch behave
+        # like a constant-window classifier.  Use a normalized soft maximum
+        # alongside the mean: when every frame agrees the result is unchanged,
+        # while a short event remains visible without introducing another
+        # learned parameter or changing checkpoint tensor shapes.
+        temperature = 0.25
+        masked_photometry_logits = source_photometry_event_logits.masked_fill(
+            photometry_weights == 0, torch.finfo(source_photometry_event_logits.dtype).min
+        )
+        photometry_soft_max = temperature * (
+            torch.logsumexp(masked_photometry_logits / temperature, dim=(1, 2))
+            - photometry_count.log()
+        )
+        photometry_soft_max = torch.where(
+            photometry_present,
+            photometry_soft_max,
+            torch.zeros_like(photometry_soft_max),
+        )
+        source_photometry_event_logits = 0.5 * (photometry_mean + photometry_soft_max)
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
             visit_source_event_logits.dtype

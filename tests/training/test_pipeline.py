@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import training.pipeline as pipeline
 from synthetic import SyntheticConfig
@@ -13,6 +14,7 @@ from training.pipeline import (
     PhaseReport,
     train_synthetic_then_real,
 )
+from training.adapters import AstroMambaHInputs, AstroMambaHTrainingBatch
 
 
 def _phase_with_examples(phase: str, examples_seen: int) -> PhaseReport:
@@ -21,6 +23,101 @@ def _phase_with_examples(phase: str, examples_seen: int) -> PhaseReport:
         reports=(SimpleNamespace(samples_seen=examples_seen, last_loss=0.5),),
         stopped_reason="step_budget_exhausted",
     )
+
+
+def _stream_batch(sample_index: int, batch_size: int) -> AstroMambaHTrainingBatch:
+    return AstroMambaHTrainingBatch(
+        inputs=AstroMambaHInputs(
+            raster=torch.zeros(batch_size, 1, 1, 6, 32, 32),
+            wavelength_tokens=torch.zeros(batch_size, 1, 1, 1, 8),
+            wavelength_mask=torch.ones(batch_size, 1, 1, 1, dtype=torch.bool),
+            object_tokens=torch.zeros(batch_size, 1, 1, 12),
+            object_mask=torch.ones(batch_size, 1, 1, dtype=torch.bool),
+            geometry=torch.zeros(batch_size, 1, 1, 10),
+            exposure_duration=torch.ones(batch_size, 1, 1, 1),
+            coverage_vector=torch.ones(batch_size, 1, 1, 6),
+            local_time=torch.zeros(batch_size, 1, 1, 5),
+            long_time=torch.zeros(batch_size, 1, 5),
+            source_xy=torch.full((batch_size, 2), 0.5),
+        ),
+        target=torch.zeros(batch_size, 1),
+        metadata={"sample_index": sample_index, "pair_id": f"pair-{sample_index}"},
+    )
+
+
+class _RecordingTrainer:
+    device = torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.state = SimpleNamespace(samples_seen=0, optimizer_steps=0)
+        self.calls: list[tuple[list[dict[str, object]], int]] = []
+
+    def train_epoch(self, batches, *, loss_fn, accumulation_steps):
+        materialized = list(batches)
+        self.calls.append(([dict(batch.metadata) for batch in materialized], accumulation_steps))
+        self.state.samples_seen += sum(batch.batch_size for batch in materialized)
+        self.state.optimizer_steps += 1
+        return SimpleNamespace(
+            samples_seen=sum(batch.batch_size for batch in materialized),
+            last_loss=1.0,
+            rss_within_cap=True,
+            peak_gpu_memory_bytes=0,
+        )
+
+
+def test_train_phase_advances_synthetic_indices_and_updates_once_per_pair() -> None:
+    trainer = _RecordingTrainer()
+
+    def stream_factory(config, *, sample_count, device, start_index):
+        assert sample_count == 3
+        for offset in range(sample_count):
+            yield _stream_batch(start_index + offset, 2)
+
+    report = pipeline._train_phase(
+        trainer,
+        "synthetic_pretraining",
+        stream_factory,
+        SyntheticConfig(seed=4),
+        3,
+        0.01,
+        100,
+        real_parents=None,
+        synthetic_cache_dir=None,
+        synthetic_cache_size=1,
+        start_index=10,
+    )
+
+    assert [item["sample_index"] for item in report.sample_descriptors] == [10, 11, 12]
+    assert [accumulation for _, accumulation in trainer.calls] == [2, 2, 2]
+    assert trainer.state.optimizer_steps == 3
+    assert report.examples_seen == 6
+
+
+def test_train_phase_advances_real_parent_indices_without_recreating_stream() -> None:
+    trainer = _RecordingTrainer()
+
+    def stream_factory(parents, *, sample_count, device, start_index):
+        assert tuple(parents) == ("parent-a", "parent-b")
+        for offset in range(sample_count):
+            yield _stream_batch(start_index + offset, 1)
+
+    report = pipeline._train_phase(
+        trainer,
+        "real_parent_finetuning",
+        stream_factory,
+        None,
+        4,
+        0.01,
+        100,
+        real_parents=("parent-a", "parent-b"),
+        synthetic_cache_dir=None,
+        synthetic_cache_size=1,
+        start_index=7,
+    )
+
+    assert [item["sample_index"] for item in report.sample_descriptors] == [7, 8, 9, 10]
+    assert [accumulation for _, accumulation in trainer.calls] == [1, 1, 1, 1]
+    assert trainer.state.optimizer_steps == 4
 
 
 def test_real_parent_phase_is_skipped_until_default_synthetic_warmup_is_met(

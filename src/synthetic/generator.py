@@ -59,10 +59,20 @@ class SyntheticGenerator:
             mids, starts, ends, wavelengths
         )
         relativity_terms, relativity_metadata = self._relativity_terms(mids)
-        log_wavelength_span = max(float(np.ptp(np.log10(wavelengths))), 1e-12)
-        observed_wavelength_coordinate = rest_wavelength_coordinate[None, None, :] + (
-            np.log10(relativity_terms["doppler_factor"])[..., None] / log_wavelength_span
-        )
+        log_wavelength_span = float(np.ptp(np.log10(wavelengths)))
+        if log_wavelength_span > 1e-8:
+            observed_wavelength_coordinate = rest_wavelength_coordinate[None, None, :] + (
+                np.log10(relativity_terms["doppler_factor"])[..., None] / log_wavelength_span
+            )
+        else:
+            # A single photometric band cannot resolve a spectral Doppler
+            # displacement. Keep its coordinate finite and retain the
+            # relativistic term in the provenance metadata instead of
+            # dividing by an artificial near-zero wavelength span.
+            observed_wavelength_coordinate = np.broadcast_to(
+                rest_wavelength_coordinate[None, None, :],
+                (config.visits, config.local_steps, wavelengths.size),
+            ).copy()
         nuisance_layers = self._nuisance_layers(rng, mids, starts, ends)
         noisy_null, noisy_injected, uncertainty = self._apply_noise(
             rng, latent_null, latent_injected, exposure_days, nuisance_layers
@@ -503,17 +513,52 @@ class SyntheticGenerator:
             + spatial
             + geometric[..., None, None]
         )
-        residual = (physical - baseline * (1.0 + geometric[..., None, None])) / np.maximum(
-            scalar_uncertainty[..., None, None] + 0.0002, 1e-8
+        # Match the real TPF adapter's count-domain normalization.  The
+        # synthetic scene is dimensionless, so one scene unit is the
+        # equivalent of the adapter's minimum one-count scale.  Dividing by
+        # the tiny Poisson uncertainty here makes a 1% transit look like a
+        # many-sigma impulse and creates a domain-only shortcut.
+        # Reuse the existing baseline buffer.  This matters for the bounded
+        # NumPy generator: materializing both a geometric baseline and a
+        # second normalization map needlessly raises peak Python-traced
+        # allocation for larger compact test scenes.
+        baseline *= 1.0 + geometric[..., None, None]
+        np.maximum(np.abs(baseline), 1.0, out=baseline)
+        # Channel 0 is the real adapter's global-baseline image view: retain
+        # the resolved/unresolved field-star structure relative to the unit
+        # background. Channel 1 below is the separate local-baseline event
+        # residual used for transit evidence.
+        normalized_physical = np.clip(
+            physical - 1.0,
+            -20.0,
+            20.0,
+        )
+        residual = np.clip(
+            (physical - baseline) / baseline,
+            -20.0,
+            20.0,
         )
         uncertainty_map = np.broadcast_to(
-            scalar_uncertainty[..., None, None] + 0.0002, physical.shape
+            np.clip(
+                (scalar_uncertainty[..., None, None] + 0.0002) / baseline,
+                0.0,
+                20.0,
+            ),
+            physical.shape,
         ).copy()
         valid_map = np.broadcast_to(valid[..., None, None], physical.shape).copy()
         interpolation_map = np.broadcast_to(interpolation[..., None, None], physical.shape).copy()
         coverage = valid_map * (0.5 + 0.5 * wavelength_mask.all(axis=-1)[..., None, None])
         raster = np.stack(
-            (physical, residual, uncertainty_map, valid_map, interpolation_map, coverage), axis=2
+            (
+                normalized_physical,
+                residual,
+                uncertainty_map,
+                valid_map,
+                interpolation_map,
+                coverage,
+            ),
+            axis=2,
         ).astype(np.float32)
         raster *= np.where(valid_map[:, :, None], 1.0, np.array([0, 0, 1, 0, 0, 0], dtype=np.float32)[None, None, :, None, None])
         return raster
@@ -719,9 +764,20 @@ class SyntheticGenerator:
         wavelength_mask: np.ndarray,
     ) -> np.ndarray:
         config = self.config
-        normalized_bandwidth = config.wavelength_bandwidth_nm / max(np.ptp(config.wavelength_nm), 1.0)
+        # Express bandwidth as a fraction of the representative wavelength.
+        # Using wavelength span as the denominator made a single-band
+        # observation's feature explode to 50, while the real adapter uses a
+        # bounded normalized bandwidth token.
+        normalized_bandwidth = config.wavelength_bandwidth_nm / max(
+            float(np.mean(config.wavelength_nm)),
+            1.0,
+        )
         normalized_log_exposure = np.log10(config.exposure_seconds) / 5.0
-        residual = (measurements - 1.0) / np.maximum(uncertainty, 1e-8)
+        residual = np.clip(
+            (measurements - 1.0) / np.maximum(uncertainty, 1.0e-3),
+            -20.0,
+            20.0,
+        )
         tokens = np.stack(
             (
                 np.broadcast_to(coordinate, measurements.shape),
