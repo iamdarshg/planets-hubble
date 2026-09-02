@@ -197,7 +197,7 @@ def main() -> int:
                 raise MemoryError(f"RSS cap exceeded: {peak_rss} > {args.rss_cap_bytes}")
             del batch, output, loss
         with torch.inference_mode():
-            validation_metrics = _metrics(model, args.manifest.parent, validation, device, args.pairs_per_batch * 2)
+            validation_metrics = _metrics(model, args.manifest.parent, validation, device, args.pairs_per_batch)
         validation_bce = float(validation_metrics["mean_bce_loss"])
         history.append({"epoch": epoch, "steps": len(losses), "mean_loss": sum(losses) / len(losses), "validation": validation_metrics})
         if validation_bce < best_bce:
@@ -208,7 +208,7 @@ def main() -> int:
     if best_state is None:
         raise RuntimeError("no conditioned-training checkpoint was produced")
     model.load_state_dict(best_state)
-    test_metrics = _metrics(model, args.manifest.parent, [record for record in records if record.get("split") == "test"], device, args.pairs_per_batch * 2)
+    test_metrics = _metrics(model, args.manifest.parent, [record for record in records if record.get("split") == "test"], device, args.pairs_per_batch)
     args.output_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output_checkpoint.with_suffix(args.output_checkpoint.suffix + ".tmp")
     torch.save({"model": model.state_dict(), "base_checkpoint": str(args.input_checkpoint), "training_history": history, "input_mode": "real_kepler_control_parent_in_memory_transit_injection", "best_epoch": best_epoch, "best_validation_bce": best_bce}, temporary)
