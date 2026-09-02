@@ -296,8 +296,10 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
     result = model.load_state_dict(state_dict, strict=False)
-    if result.missing_keys or result.unexpected_keys:
-        raise RuntimeError(f"checkpoint mismatch: missing={result.missing_keys} unexpected={result.unexpected_keys}")
+    allowed_missing = {"core.temporal_summary_event.0.weight", "core.temporal_summary_event.0.bias", "core.temporal_summary_event.2.weight", "core.temporal_summary_event.2.bias"}
+    unexpected_missing = set(result.missing_keys) - allowed_missing
+    if unexpected_missing or result.unexpected_keys:
+        raise RuntimeError(f"checkpoint mismatch: missing={sorted(unexpected_missing)} unexpected={result.unexpected_keys}")
     return model
 
 

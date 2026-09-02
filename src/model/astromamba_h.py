@@ -743,6 +743,17 @@ class AstroMambaH(nn.Module):
             nn.Linear(config.embedding_dim, config.embedding_dim),
         )
         self.source_photometry_event = nn.Linear(2, 1)
+        # A compact, explicitly temporal evidence path.  Its final layer is
+        # zero-initialized below so checkpoints created before this head was
+        # added retain their previous predictions until the new evidence is
+        # trained on the target domain.
+        self.temporal_summary_event = nn.Sequential(
+            nn.Linear(12, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.temporal_summary_event[-1].weight)
+        nn.init.zeros_(self.temporal_summary_event[-1].bias)
         self.cross_modal_fusion = nn.ModuleList(
             CrossModalBlock(config) for _ in range(config.fusion_blocks)
         )
@@ -1035,6 +1046,42 @@ class AstroMambaH(nn.Module):
             torch.zeros_like(photometry_soft_max),
         )
         source_photometry_event_logits = 0.5 * (photometry_mean + photometry_soft_max)
+        summary_mask = photometry_weights[..., 0]
+        summary_count = summary_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        delta = source_photometry_values[..., 0] - 1.0
+        score = source_photometry_values[..., 1]
+        delta_mean = (delta * summary_mask).sum(dim=(1, 2)) / summary_count
+        delta_centered = delta - delta_mean[:, None, None]
+        delta_std = (
+            (delta_centered.square() * summary_mask).sum(dim=(1, 2)) / summary_count
+        ).sqrt()
+        delta_masked_min = delta.masked_fill(summary_mask == 0, 0.0).amin(dim=(1, 2))
+        delta_masked_max = delta.masked_fill(summary_mask == 0, 0.0).amax(dim=(1, 2))
+        score_mean = (score * summary_mask).sum(dim=(1, 2)) / summary_count
+        score_centered = score - score_mean[:, None, None]
+        score_std = (
+            (score_centered.square() * summary_mask).sum(dim=(1, 2)) / summary_count
+        ).sqrt()
+        score_masked_min = score.masked_fill(summary_mask == 0, 20.0).amin(dim=(1, 2))
+        score_masked_max = score.masked_fill(summary_mask == 0, -20.0).amax(dim=(1, 2))
+        temporal_summary = torch.stack(
+            (
+                (delta_mean * 100.0).clamp(-20.0, 20.0),
+                (delta_std * 100.0).clamp(0.0, 20.0),
+                (delta_masked_min * 100.0).clamp(-20.0, 20.0),
+                (delta_masked_max * 100.0).clamp(-20.0, 20.0),
+                (score_mean / 5.0).clamp(-20.0, 20.0),
+                (score_std / 5.0).clamp(0.0, 20.0),
+                (score_masked_min / 5.0).clamp(-20.0, 20.0),
+                (score_masked_max / 5.0).clamp(-20.0, 20.0),
+                ((score < -1.0).to(score.dtype) * summary_mask).sum(dim=(1, 2)) / summary_count,
+                ((score < -2.0).to(score.dtype) * summary_mask).sum(dim=(1, 2)) / summary_count,
+                ((score < -3.0).to(score.dtype) * summary_mask).sum(dim=(1, 2)) / summary_count,
+                ((score_masked_min - score_mean) / 5.0).clamp(-20.0, 20.0),
+            ),
+            dim=-1,
+        )
+        temporal_summary_event_logits = self.temporal_summary_event(temporal_summary).squeeze(-1)
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
             visit_source_event_logits.dtype
@@ -1046,7 +1093,7 @@ class AstroMambaH(nn.Module):
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
-        )
+        ) + temporal_summary_event_logits
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
