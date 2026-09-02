@@ -28,6 +28,12 @@ def main() -> int:
     parser.add_argument("--launch-retries", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1.0e-5)
+    parser.add_argument(
+        "--loss-mode",
+        choices=("event", "mil"),
+        default="event",
+        help="training objective passed to each one-epoch child",
+    )
     parser.add_argument("--weight-decay", type=float, default=1.0e-4)
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cpu")
@@ -79,7 +85,7 @@ def main() -> int:
             "--scheduler",
             "cosine",
             "--loss-mode",
-            "event",
+            args.loss_mode,
             "--weight-decay",
             str(args.weight_decay),
             "--seed",
