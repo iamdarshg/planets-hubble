@@ -435,6 +435,12 @@ def main() -> int:
     parser.add_argument("--input-checkpoint", type=Path, required=True)
     parser.add_argument("--output-checkpoint", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--eval-batch-size",
+        type=int,
+        default=64,
+        help="batch size used only for train/validation/test metrics",
+    )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--optimizer", choices=("adamw", "muon"), default="adamw")
@@ -460,8 +466,8 @@ def main() -> int:
         help="reinitialize the source-conditioned 2-feature projection/event head after loading the checkpoint",
     )
     args = parser.parse_args()
-    if args.batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
-        raise ValueError("batch-size, epochs, and learning-rate must be positive; weight-decay cannot be negative")
+    if args.batch_size < 1 or args.eval_batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
+        raise ValueError("batch sizes, epochs, and learning-rate must be positive; weight-decay cannot be negative")
     if args.rss_cap_bytes < 1:
         raise ValueError("rss-cap-bytes must be positive")
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
@@ -516,6 +522,7 @@ def main() -> int:
         synthetic_config = synthetic_config_factory(seed=23)
         synthetic_cache_dir.mkdir(parents=True, exist_ok=True)
     peak_rss = _rss_bytes()
+    eval_batch_size = args.eval_batch_size
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     history: list[dict[str, object]] = []
@@ -581,8 +588,18 @@ def main() -> int:
             if global_step % 10 == 0:
                 print(json.dumps({"epoch": epoch, "step": global_step, "loss": losses[-1], "rss_bytes": peak_rss}), flush=True)
         with torch.inference_mode():
-            train_metrics = _metrics(model, root, splits["train"], device, args.batch_size)
-            validation_metrics = _metrics(model, root, splits["validation"], device, args.batch_size)
+            train_metrics = _metrics(model, root, splits["train"], device, eval_batch_size)
+            peak_rss = max(peak_rss, _rss_bytes())
+            if peak_rss > args.rss_cap_bytes:
+                raise MemoryError(
+                    f"RSS cap exceeded during train metrics: {peak_rss} > {args.rss_cap_bytes}"
+                )
+            validation_metrics = _metrics(model, root, splits["validation"], device, eval_batch_size)
+            peak_rss = max(peak_rss, _rss_bytes())
+            if peak_rss > args.rss_cap_bytes:
+                raise MemoryError(
+                    f"RSS cap exceeded during validation metrics: {peak_rss} > {args.rss_cap_bytes}"
+                )
         history.append({
             "epoch": epoch,
             "steps": len(losses),
@@ -609,7 +626,10 @@ def main() -> int:
     if best_state_dict is None:
         raise RuntimeError("no validation checkpoint was produced")
     model.load_state_dict(best_state_dict)
-    test_metrics = _metrics(model, root, splits["test"], device, args.batch_size)
+    test_metrics = _metrics(model, root, splits["test"], device, eval_batch_size)
+    peak_rss = max(peak_rss, _rss_bytes())
+    if peak_rss > args.rss_cap_bytes:
+        raise MemoryError(f"RSS cap exceeded during test metrics: {peak_rss} > {args.rss_cap_bytes}")
     args.output_checkpoint.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output_checkpoint.with_suffix(args.output_checkpoint.suffix + ".tmp")
     torch.save(
@@ -648,6 +668,7 @@ def main() -> int:
         "output_checkpoint": str(args.output_checkpoint),
         "device": str(device),
         "batch_size": args.batch_size,
+        "eval_batch_size": eval_batch_size,
         "epochs": args.epochs,
         "learning_rate": args.learning_rate,
         "optimizer": args.optimizer,
