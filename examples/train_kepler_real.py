@@ -298,6 +298,18 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     return model
 
 
+def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
+    """Reinitialize only the small branch whose input semantics changed.
+
+    The spatial/temporal backbone remains initialized from the supplied
+    checkpoint. This prevents weights trained on the previous feature-6
+    constant from biasing the newly aligned robust temporal signal.
+    """
+
+    for module in (model.source_photometry_projection, model.source_photometry_event):
+        module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
+
+
 def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:
     model.eval()
     probabilities: list[float] = []
@@ -439,6 +451,11 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rss-cap-bytes", type=int, default=RSS_CAP_BYTES)
+    parser.add_argument(
+        "--reset-source-photometry-branch",
+        action="store_true",
+        help="reinitialize the source-conditioned 2-feature projection/event head after loading the checkpoint",
+    )
     args = parser.parse_args()
     if args.batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
         raise ValueError("batch-size, epochs, and learning-rate must be positive; weight-decay cannot be negative")
@@ -468,6 +485,8 @@ def main() -> int:
     if not args.input_checkpoint.is_file():
         raise FileNotFoundError(args.input_checkpoint)
     model = _load_model(args.input_checkpoint, device)
+    if args.reset_source_photometry_branch:
+        _reset_source_photometry_branch(model)
     optimizers, optimizer_policy = _build_optimizers(
         model,
         name=args.optimizer,
@@ -613,6 +632,7 @@ def main() -> int:
             "best_validation_bce": best_validation_bce,
             "best_validation_accuracy": best_validation_accuracy,
             "selection_metric": "validation_mean_bce_loss",
+            "reset_source_photometry_branch": args.reset_source_photometry_branch,
         },
         temporary,
     )
