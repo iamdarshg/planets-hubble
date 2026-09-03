@@ -2,8 +2,9 @@
 
 This is a real-data adapter, not the synthetic injection path.  Each record is
 an observed MAST TPF window labelled from the Kepler DR25 confirmed-planet
-ephemeris.  The compact TPF pixels are centered in a 32x32 canvas by padding
-only; no spatial resampling or synthetic transit generation is performed.
+ephemeris.  The compact TPF pixels are placed at a deterministic, host-keyed
+non-centered offset in a 32x32 canvas by padding only; no spatial resampling or
+synthetic transit generation is performed.
 """
 
 from __future__ import annotations
@@ -69,6 +70,34 @@ def _batch_records(records: list[dict[str, object]], batch_size: int, *, seed: i
 def _pair_key(record: dict[str, object]) -> str:
     stem = Path(str(record["path"])).stem
     return stem.rsplit("-", 1)[0]
+
+
+def _canvas_offset(record: dict[str, object], height: int, width: int, canvas: int) -> tuple[int, int]:
+    """Choose a stable non-centered offset shared by a host's pair.
+
+    The offset is derived only from the TPF identity, not the label or the
+    event/control center.  This preserves the counterfactual pair contract
+    while exposing the spatial encoder to the same translation variation as
+    the synthetic observations.
+    """
+
+    if height > canvas or width > canvas:
+        raise ValueError(f"TPF cutout {height}x{width} does not fit compact {canvas}x{canvas} canvas")
+    provenance = record.get("provenance")
+    tpf_url = provenance.get("tpf_url") if isinstance(provenance, dict) else None
+    identity = tpf_url if isinstance(tpf_url, str) and tpf_url else _pair_key(record)
+    digest = hashlib.blake2b(identity.encode("utf-8"), digest_size=8).digest()
+    available_y = canvas - height + 1
+    available_x = canvas - width + 1
+    y0 = int.from_bytes(digest[:4], "little") % available_y
+    x0 = int.from_bytes(digest[4:], "little") % available_x
+    centered_y = (canvas - height) // 2
+    centered_x = (canvas - width) // 2
+    if available_y > 1 and y0 == centered_y:
+        y0 = (y0 + 1) % available_y
+    if available_x > 1 and x0 == centered_x:
+        x0 = (x0 + 1) % available_x
+    return y0, x0
 
 
 def _paired_batch_records(
@@ -289,8 +318,7 @@ def _load_example(
     )
     frames, height, width = normalized.shape
     raster = np.zeros((frames, 6, canvas, canvas), dtype=np.float32)
-    y0 = (canvas - height) // 2
-    x0 = (canvas - width) // 2
+    y0, x0 = _canvas_offset(record, height, width, canvas)
     raster[:, 0, y0 : y0 + height, x0 : x0 + width] = normalized
     raster[:, 1, y0 : y0 + height, x0 : x0 + width] = residual
     raster[:, 2, y0 : y0 + height, x0 : x0 + width] = err
