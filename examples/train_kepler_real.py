@@ -182,7 +182,10 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
             np.full(frames, 80.0 / 650.0, dtype=np.float32),
             np.full(frames, np.log10(max(cadence_seconds, 1.0)) / 5.0, dtype=np.float32),
             temporal_score,
-            quality_fraction,
+            # Match the synthetic validity-mask semantics. Quality flags are
+            # retained as a separate coverage feature; they do not erase an
+            # otherwise finite detector measurement from the photometry path.
+            valid_fraction,
         ),
         axis=-1,
     )[:, None, :]
@@ -242,10 +245,11 @@ def _make_batch(root: Path, records: list[dict[str, object]], device: torch.devi
         long_time[index, 0] = example["long_time"]  # type: ignore[index]
         objects[index, 0] = example["object_tokens"]  # type: ignore[index]
         step_mask[index, 0, :count] = True
-        # The last wavelength token is the real adapter's quality-valid
-        # fraction. Do not present invalid or quality-flagged cadences as
-        # photometry: zero-filled detector values otherwise look like an
-        # artificial -20 transit score to the event heads.
+        # The last wavelength token is the real adapter's finite-data
+        # validity fraction. Do not present invalid/zero-filled cadences as
+        # photometry: they otherwise look like an artificial -20 transit
+        # score to the event heads. Quality flags remain available through
+        # the separate coverage channels.
         wavelength_mask[index, 0, :count, 0] = (
             np.asarray(example["wavelength_tokens"], dtype=np.float32)[:, 0, 7] > 0.0
         )
