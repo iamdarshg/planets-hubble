@@ -524,6 +524,36 @@ def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
         module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
 
 
+def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
+    """Reset compact event heads when their photometry input distribution changes."""
+
+    modules = (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
+        model.core.temporal_matched_event,
+        model.core.temporal_sequence_event,
+        model.core.temporal_sequence_projection,
+    )
+    for module in modules:
+        module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
+    for module in (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
+        model.core.temporal_matched_event,
+        model.core.temporal_sequence_projection,
+    ):
+        final = module[-1]
+        final.weight.data.zero_()
+        final.bias.data.zero_()
+    with torch.no_grad():
+        model.core.event_logit_scale.fill_(1.0)
+        model.core.event_source_weight.fill_(1.0)
+        model.core.event_backbone_weight.fill_(0.5)
+        model.core.event_photometry_weight.fill_(0.5)
+
+
 def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
     """Train only the compact temporal evidence calibration heads."""
 
@@ -763,6 +793,11 @@ def main() -> int:
         help="reinitialize the source-conditioned 2-feature projection/event head after loading the checkpoint",
     )
     parser.add_argument(
+        "--reset-temporal-event-heads",
+        action="store_true",
+        help="reinitialize compact temporal event heads when the photometry input distribution changes",
+    )
+    parser.add_argument(
         "--train-only-temporal-summary",
         action="store_true",
         help="freeze the representation and train only the compact temporal evidence calibration head",
@@ -831,6 +866,8 @@ def main() -> int:
     model = _load_model(args.input_checkpoint, device)
     if args.reset_source_photometry_branch:
         _reset_source_photometry_branch(model)
+    if args.reset_temporal_event_heads:
+        _reset_temporal_event_heads(model)
     if args.train_only_temporal_summary:
         _freeze_except_temporal_summary(model)
     if args.train_only_event_calibration:
@@ -1050,6 +1087,7 @@ def main() -> int:
             "best_validation_accuracy": best_validation_accuracy,
             "selection_metric": "validation_mean_bce_loss",
             "reset_source_photometry_branch": args.reset_source_photometry_branch,
+            "reset_temporal_event_heads": args.reset_temporal_event_heads,
             "train_only_temporal_summary": args.train_only_temporal_summary,
             "train_only_event_calibration": args.train_only_event_calibration,
             "train_only_event_heads": args.train_only_event_heads,
@@ -1098,6 +1136,7 @@ def main() -> int:
         "best_validation_bce": best_validation_bce,
         "best_validation_accuracy": best_validation_accuracy,
         "selection_metric": "validation_mean_bce_loss",
+        "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "test": test_metrics,
         "peak_process_rss_bytes": peak_rss,
         "rss_cap_bytes": args.rss_cap_bytes,
