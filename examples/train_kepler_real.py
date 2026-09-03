@@ -211,9 +211,15 @@ def _robust_temporal_score(photometry: np.ndarray, uncertainty: np.ndarray) -> n
 
 
 @lru_cache(maxsize=16)
-def _load_full_tpf_lightcurve(raw_tpf_dir: str, filename: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+def _load_full_tpf_lightcurve(
+    raw_tpf_dir: str,
+    filename: str,
+    aperture_fraction: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Load one bounded full-quarter aperture light curve for local detrending."""
 
+    if not 0.0 < aperture_fraction <= 1.0:
+        raise ValueError("aperture_fraction must be in (0, 1]")
     path = Path(raw_tpf_dir) / filename
     if not path.is_file():
         return None
@@ -230,7 +236,21 @@ def _load_full_tpf_lightcurve(raw_tpf_dir: str, filename: str) -> tuple[np.ndarr
             if not np.isfinite(flux).any():
                 flux = np.asarray(table["RAW_CNTS"], dtype=np.float32)
         valid = np.isfinite(times) & np.isfinite(flux).any(axis=(1, 2))
-        aperture = np.sum(np.where(np.isfinite(flux), flux, 0.0), axis=(1, 2)).astype(np.float64)
+        median_image = np.nanmedian(np.where(np.isfinite(flux), flux, np.nan), axis=0)
+        finite_median = np.isfinite(median_image)
+        if not finite_median.any():
+            aperture_mask = np.ones(flux.shape[1:], dtype=bool)
+        else:
+            count = max(1, int(np.ceil(float(finite_median.sum()) * aperture_fraction)))
+            ranked = np.where(finite_median, median_image, -np.inf).reshape(-1)
+            selected = np.argpartition(ranked, -count)[-count:]
+            aperture_mask = np.zeros(ranked.shape[0], dtype=bool)
+            aperture_mask[selected] = True
+            aperture_mask = aperture_mask.reshape(flux.shape[1:])
+        aperture = np.sum(
+            np.where(np.isfinite(flux) & aperture_mask[None, :, :], flux, 0.0),
+            axis=(1, 2),
+        ).astype(np.float64)
         valid &= aperture > 0.0
         if int(valid.sum()) < 8:
             return None
@@ -258,6 +278,7 @@ def _full_tpf_detrended_photometry(
     local_times: np.ndarray,
     *,
     raw_tpf_dir: Path,
+    aperture_fraction: float,
 ) -> np.ndarray | None:
     provenance = record.get("provenance")
     if not isinstance(provenance, dict):
@@ -266,7 +287,11 @@ def _full_tpf_detrended_photometry(
     if not isinstance(tpf_url, str) or not tpf_url:
         return None
     filename = tpf_url.rsplit("/", 1)[-1]
-    loaded = _load_full_tpf_lightcurve(str(raw_tpf_dir.resolve()), filename)
+    loaded = _load_full_tpf_lightcurve(
+        str(raw_tpf_dir.resolve()),
+        filename,
+        aperture_fraction,
+    )
     if loaded is None:
         return None
     full_times, aperture, baseline, valid = loaded
@@ -312,6 +337,7 @@ def _load_example(
             record,
             times,
             raw_tpf_dir=raw_tpf_dir,
+            aperture_fraction=aperture_fraction,
         )
         if detrended is not None:
             temporal_score_photometry = detrended
@@ -821,7 +847,7 @@ def main() -> int:
     parser.add_argument(
         "--full-tpf-detrend",
         action="store_true",
-        help="detrend local photometry against a degree-3 fit to the retained full TPF quarter",
+        help="detrend local photometry against a bounded degree-6 fit to the retained full TPF quarter",
     )
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cuda")
