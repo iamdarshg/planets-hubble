@@ -42,6 +42,7 @@ def combine_source_conditioned_event_logits(
     source_event_logits: Tensor,
     source_photometry_event_logits: Tensor,
     *,
+    source_weight: float = 1.0,
     backbone_weight: float = 0.5,
     photometry_weight: float = 0.5,
 ) -> Tensor:
@@ -63,10 +64,10 @@ def combine_source_conditioned_event_logits(
         raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
     if source_photometry_event_logits.shape != (pooled_backbone_logits.shape[0], 1):
         raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
-    if not 0.0 <= backbone_weight <= 1.0 or not 0.0 <= photometry_weight <= 1.0:
-        raise ValueError("evidence weights must be in [0, 1]")
+    if not 0.0 <= source_weight <= 2.0 or not 0.0 <= backbone_weight <= 2.0 or not 0.0 <= photometry_weight <= 2.0:
+        raise ValueError("evidence weights must be in [0, 2]")
     return (
-        source_event_logits[:, 0]
+        source_weight * source_event_logits[:, 0]
         + backbone_weight * pooled_backbone_logits
         + photometry_weight * source_photometry_event_logits[:, 0]
     )
@@ -747,6 +748,9 @@ class AstroMambaH(nn.Module):
         # in pre-calibration checkpoints is treated as the identity scale by
         # the real-data adapter.
         self.event_logit_scale = nn.Parameter(torch.tensor(1.0))
+        self.event_source_weight = nn.Parameter(torch.tensor(1.0))
+        self.event_backbone_weight = nn.Parameter(torch.tensor(0.5))
+        self.event_photometry_weight = nn.Parameter(torch.tensor(0.5))
         # A compact, explicitly temporal evidence path.  Its final layer is
         # zero-initialized below so checkpoints created before this head was
         # added retain their previous predictions until the new evidence is
@@ -1220,6 +1224,9 @@ class AstroMambaH(nn.Module):
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
+            source_weight=self.event_source_weight.clamp(0.0, 2.0),
+            backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
+            photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
         ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_sequence_event_logits
         global_event_logits = global_event_logits * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
