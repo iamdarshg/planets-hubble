@@ -355,6 +355,32 @@ def _new_model(device: torch.device) -> AstroMambaHTrainingAdapter:
     return model
 
 
+def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
+    """Keep the learned representation fixed during synthetic recalibration."""
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for module in (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
+        model.core.temporal_matched_event,
+        model.core.temporal_sequence_event,
+        model.core.temporal_sequence_projection,
+        model.core.source_photometry_projection,
+        model.core.source_photometry_event,
+    ):
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+    for parameter in (
+        model.core.event_logit_scale,
+        model.core.event_source_weight,
+        model.core.event_backbone_weight,
+        model.core.event_photometry_weight,
+    ):
+        parameter.requires_grad = True
+
+
 def _rss() -> int:
     try:
         import psutil
@@ -433,6 +459,11 @@ def main() -> int:
         default="event",
         help="event-only detector curriculum, or proposal-aware source auxiliary loss",
     )
+    parser.add_argument(
+        "--train-only-event-heads",
+        action="store_true",
+        help="freeze the backbone and adapt only compact event decision heads",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--cache-dir", type=Path)
@@ -470,8 +501,13 @@ def main() -> int:
     if not args.from_scratch and (args.input_checkpoint is None or not args.input_checkpoint.is_file()):
         raise FileNotFoundError(args.input_checkpoint)
     model = _new_model(device) if args.from_scratch else _load_model(args.input_checkpoint, device)
+    if args.train_only_event_heads:
+        _freeze_except_event_heads(model)
     loss_fn = event_only_loss_fn if args.loss_mode == "event" else source_event_loss_fn
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=1e-4)
+    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable_parameters:
+        raise RuntimeError("event-head-only mode produced no trainable parameters")
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=args.learning_rate, weight_decay=1e-4)
     generator_config = _synthetic_config(seed=23)
     cache_dir = args.cache_dir or args.output_checkpoint.parent / "multistar-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -554,6 +590,7 @@ def main() -> int:
                 "amp_dtype": "bfloat16" if device.type == "cuda" else None,
                 "input_mode": "synthetic_detector_8x8_embedded_32x32_source_supervised",
                 "loss_mode": args.loss_mode,
+                "train_only_event_heads": args.train_only_event_heads,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
                 "field_planet_probability": generator_config.field_planet_probability,
@@ -590,6 +627,7 @@ def main() -> int:
             "amp_dtype": "bfloat16" if device.type == "cuda" else None,
             "input_mode": "synthetic_detector_8x8_embedded_32x32_source_supervised",
             "loss_mode": args.loss_mode,
+            "train_only_event_heads": args.train_only_event_heads,
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
             "field_planet_probability": generator_config.field_planet_probability,
@@ -620,6 +658,7 @@ def main() -> int:
         "views_trained": args.pair_count * 2,
         "scene_model": "multi_star_field_target_counterfactual",
         "loss_mode": args.loss_mode,
+        "train_only_event_heads": args.train_only_event_heads,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
         "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
