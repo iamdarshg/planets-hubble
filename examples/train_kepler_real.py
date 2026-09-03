@@ -231,6 +231,7 @@ def _make_batch(root: Path, records: list[dict[str, object]], device: torch.devi
     long_time = np.zeros((batch_size, 1, 5), dtype=np.float32)
     objects = np.zeros((batch_size, 1, 1, 12), dtype=np.float32)
     step_mask = np.zeros((batch_size, 1, frames), dtype=bool)
+    wavelength_mask = np.zeros((batch_size, 1, frames, 1), dtype=bool)
     for index, example in enumerate(examples):
         count = int(example["raster"].shape[0])  # type: ignore[union-attr]
         raster[index, 0, :count] = example["raster"]  # type: ignore[index]
@@ -241,13 +242,20 @@ def _make_batch(root: Path, records: list[dict[str, object]], device: torch.devi
         long_time[index, 0] = example["long_time"]  # type: ignore[index]
         objects[index, 0] = example["object_tokens"]  # type: ignore[index]
         step_mask[index, 0, :count] = True
+        # The last wavelength token is the real adapter's quality-valid
+        # fraction. Do not present invalid or quality-flagged cadences as
+        # photometry: zero-filled detector values otherwise look like an
+        # artificial -20 transit score to the event heads.
+        wavelength_mask[index, 0, :count, 0] = (
+            np.asarray(example["wavelength_tokens"], dtype=np.float32)[:, 0, 7] > 0.0
+        )
     # Keep the optimizer's master parameters and input staging tensors in
     # FP32. CUDA autocast below is compute-only.
     floating = torch.float32
     inputs = AstroMambaHInputs(
         raster=torch.from_numpy(raster).to(device=device, dtype=floating),
         wavelength_tokens=torch.from_numpy(wavelength).to(device=device, dtype=floating),
-        wavelength_mask=torch.ones((batch_size, 1, frames, 1), dtype=torch.bool, device=device),
+        wavelength_mask=torch.from_numpy(wavelength_mask).to(device=device),
         object_tokens=torch.from_numpy(objects).to(device=device, dtype=floating),
         object_mask=torch.ones((batch_size, 1, 1), dtype=torch.bool, device=device),
         geometry=torch.from_numpy(geometry).to(device=device, dtype=floating),
