@@ -360,6 +360,20 @@ def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
         parameter.requires_grad = True
 
 
+def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
+    """Train only the bounded global event calibration parameters."""
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for parameter in (
+        model.core.event_logit_scale,
+        model.core.event_source_weight,
+        model.core.event_backbone_weight,
+        model.core.event_photometry_weight,
+    ):
+        parameter.requires_grad = True
+
+
 def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:
     model.eval()
     probabilities: list[float] = []
@@ -518,6 +532,11 @@ def main() -> int:
         help="freeze the representation and train only the compact temporal evidence calibration head",
     )
     parser.add_argument(
+        "--train-only-event-calibration",
+        action="store_true",
+        help="freeze every feature head and train only the bounded global event calibration parameters",
+    )
+    parser.add_argument(
         "--include-validation-in-training",
         action="store_true",
         help="fit on train and validation records together after model selection; the test split remains untouched",
@@ -529,6 +548,8 @@ def main() -> int:
         raise ValueError("rss-cap-bytes must be positive")
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
+    if args.train_only_temporal_summary and args.train_only_event_calibration:
+        raise ValueError("train-only-temporal-summary and train-only-event-calibration are mutually exclusive")
     if not 0.0 <= args.label_smoothing < 1.0:
         raise ValueError("label-smoothing must be in [0, 1)")
     random.seed(args.seed)
@@ -556,6 +577,8 @@ def main() -> int:
         _reset_source_photometry_branch(model)
     if args.train_only_temporal_summary:
         _freeze_except_temporal_summary(model)
+    if args.train_only_event_calibration:
+        _freeze_except_event_calibration(model)
     optimizers, optimizer_policy = _build_optimizers(
         model,
         name=args.optimizer,
@@ -717,6 +740,7 @@ def main() -> int:
             "selection_metric": "validation_mean_bce_loss",
             "reset_source_photometry_branch": args.reset_source_photometry_branch,
             "train_only_temporal_summary": args.train_only_temporal_summary,
+            "train_only_event_calibration": args.train_only_event_calibration,
             "include_validation_in_training": args.include_validation_in_training,
         },
         temporary,
@@ -738,6 +762,8 @@ def main() -> int:
         "scheduler": args.scheduler,
         "label_smoothing": args.label_smoothing,
         "loss_mode": args.loss_mode,
+        "train_only_temporal_summary": args.train_only_temporal_summary,
+        "train_only_event_calibration": args.train_only_event_calibration,
         "synthetic_rehearsal_pairs": args.synthetic_rehearsal_pairs,
         "synthetic_rehearsal_weight": args.synthetic_rehearsal_weight,
         "synthetic_rehearsal_start_index": args.synthetic_rehearsal_start_index,
