@@ -139,6 +139,13 @@ def _load_tpf(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
         times = np.asarray(table["TIME"], dtype=np.float64)
         flux = np.asarray(table["FLUX"], dtype=np.float32)
         flux_err = np.asarray(table["FLUX_ERR"], dtype=np.float32)
+        # Kepler TPFs carry the estimated per-pixel sky/background in a
+        # separate FLUX_BKG column.  Remove it before materialising the
+        # science plane; otherwise a summed aperture is dominated by sky
+        # counts and shallow transit depths are diluted substantially.
+        if "FLUX_BKG" in table.names:
+            background = np.asarray(table["FLUX_BKG"], dtype=np.float32)
+            flux = flux - np.where(np.isfinite(background), background, 0.0)
         raw = np.asarray(table["RAW_CNTS"], dtype=np.float32)
         quality = np.asarray(table["QUALITY"], dtype=np.int32)
         if not np.isfinite(flux).any():

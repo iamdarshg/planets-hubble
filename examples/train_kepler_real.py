@@ -224,6 +224,9 @@ def _load_full_tpf_lightcurve(raw_tpf_dir: str, filename: str) -> tuple[np.ndarr
             table = hdul[1].data
             times = np.asarray(table["TIME"], dtype=np.float64)
             flux = np.asarray(table["FLUX"], dtype=np.float32)
+            if "FLUX_BKG" in table.names:
+                background = np.asarray(table["FLUX_BKG"], dtype=np.float32)
+                flux = flux - np.where(np.isfinite(background), background, 0.0)
             if not np.isfinite(flux).any():
                 flux = np.asarray(table["RAW_CNTS"], dtype=np.float32)
         valid = np.isfinite(times) & np.isfinite(flux).any(axis=(1, 2))
