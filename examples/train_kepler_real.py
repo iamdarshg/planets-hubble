@@ -106,12 +106,15 @@ def _normalize_frame_arrays(
     quality: np.ndarray,
     *,
     canvas: int = 32,
+    aperture_fraction: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
     if science.ndim != 3 or science.shape != uncertainty.shape or science.shape != finite.shape:
         raise ValueError(f"invalid TPF arrays: science={science.shape} uncertainty={uncertainty.shape} finite={finite.shape}")
     frames, height, width = science.shape
     if height > canvas or width > canvas:
         raise ValueError(f"TPF cutout {height}x{width} does not fit compact {canvas}x{canvas} canvas")
+    if not 0.0 < aperture_fraction <= 1.0:
+        raise ValueError("aperture_fraction must be in (0, 1]")
     valid = finite.astype(bool) & np.isfinite(science)
     positive_values = science[valid & (science > 0.0)]
     if positive_values.size == 0:
@@ -133,10 +136,32 @@ def _normalize_frame_arrays(
     err = np.clip(err, 0.0, 20.0)
     quality_ok = valid & (quality[:, None, None] == 0)
 
-    aperture = np.sum(np.where(valid, science, 0.0), axis=(1, 2)).astype(np.float64)
+    # Use a static source-weighted aperture for the direct photometry path.
+    # Kepler TPF cutouts include background pixels; summing every pixel lowers
+    # transit SNR and makes the learned event branch depend on cutout size.
+    # The aperture is selected from the time-median detector image, never from
+    # labels or a transit-centered statistic.
+    median_image = np.nanmedian(np.where(valid, science, np.nan), axis=0)
+    finite_median = np.isfinite(median_image)
+    if not finite_median.any():
+        aperture_mask = np.ones((height, width), dtype=bool)
+    else:
+        count = max(1, int(np.ceil(float(finite_median.sum()) * aperture_fraction)))
+        ranked = np.where(finite_median, median_image, -np.inf).reshape(-1)
+        selected = np.argpartition(ranked, -count)[-count:]
+        aperture_mask = np.zeros(height * width, dtype=bool)
+        aperture_mask[selected] = True
+        aperture_mask = aperture_mask.reshape(height, width)
+    aperture_valid = valid & aperture_mask[None, :, :]
+    aperture = np.sum(np.where(aperture_valid, science, 0.0), axis=(1, 2)).astype(np.float64)
     aperture_baseline = float(np.median(aperture[aperture > 0.0])) if np.any(aperture > 0.0) else 1.0
     photometry = np.clip(aperture / max(abs(aperture_baseline), 1.0) - 1.0, -20.0, 20.0).astype(np.float32)
-    aperture_error = np.sqrt(np.sum(np.where(valid, np.square(np.nan_to_num(uncertainty, nan=0.0)), 0.0), axis=(1, 2)))
+    aperture_error = np.sqrt(
+        np.sum(
+            np.where(aperture_valid, np.square(np.nan_to_num(uncertainty, nan=0.0)), 0.0),
+            axis=(1, 2),
+        )
+    )
     photometric_uncertainty = np.clip(aperture_error / max(abs(aperture_baseline), 1.0), 0.0, 20.0).astype(np.float32)
     return normalized, residual, err, valid.astype(np.float32), quality_ok.astype(np.float32), photometry, photometric_uncertainty
 
@@ -155,7 +180,13 @@ def _robust_temporal_score(photometry: np.ndarray, uncertainty: np.ndarray) -> n
     return np.clip((photometry - center) / scale, -20.0, 20.0).astype(np.float32)
 
 
-def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) -> dict[str, np.ndarray | float | int | str]:
+def _load_example(
+    root: Path,
+    record: dict[str, object],
+    *,
+    canvas: int = 32,
+    aperture_fraction: float = 1.0,
+) -> dict[str, np.ndarray | float | int | str]:
     with np.load(root / Path(str(record["path"])), allow_pickle=False) as arrays:
         science = np.asarray(arrays["science"], dtype=np.float32)
         uncertainty = np.asarray(arrays["uncertainty"], dtype=np.float32)
@@ -163,7 +194,12 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
         quality = np.asarray(arrays["quality"], dtype=np.int32)
         times = np.asarray(arrays["time"], dtype=np.float64)
     normalized, residual, err, valid, quality_ok, photometry, photometric_uncertainty = _normalize_frame_arrays(
-        science, uncertainty, finite, quality, canvas=canvas
+        science,
+        uncertainty,
+        finite,
+        quality,
+        canvas=canvas,
+        aperture_fraction=aperture_fraction,
     )
     temporal_score = _robust_temporal_score(photometry, photometric_uncertainty)
     frames, height, width = normalized.shape
@@ -256,8 +292,14 @@ def _load_example(root: Path, record: dict[str, object], *, canvas: int = 32) ->
     }
 
 
-def _make_batch(root: Path, records: list[dict[str, object]], device: torch.device) -> AstroMambaHTrainingBatch:
-    examples = [_load_example(root, record) for record in records]
+def _make_batch(
+    root: Path,
+    records: list[dict[str, object]],
+    device: torch.device,
+    *,
+    aperture_fraction: float = 1.0,
+) -> AstroMambaHTrainingBatch:
+    examples = [_load_example(root, record, aperture_fraction=aperture_fraction) for record in records]
     batch_size = len(examples)
     frames = max(int(example["raster"].shape[0]) for example in examples)  # type: ignore[union-attr]
     raster = np.zeros((batch_size, 1, frames, 6, 32, 32), dtype=np.float32)
@@ -427,14 +469,22 @@ def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
         parameter.requires_grad = True
 
 
-def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:
+def _metrics(
+    model,
+    root: Path,
+    records: list[dict[str, object]],
+    device: torch.device,
+    batch_size: int,
+    *,
+    aperture_fraction: float = 1.0,
+) -> dict[str, object]:
     model.eval()
     probabilities: list[float] = []
     labels: list[int] = []
     losses: list[float] = []
     with torch.inference_mode():
         for batch_records in _batch_records(records, batch_size, seed=0, shuffle=False):
-            batch = _make_batch(root, batch_records, device)
+            batch = _make_batch(root, batch_records, device, aperture_fraction=aperture_fraction)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
             logits = output["global_event_logits"].float().reshape(-1)
@@ -577,6 +627,12 @@ def main() -> int:
     parser.add_argument("--synthetic-rehearsal-weight", type=float, default=0.25)
     parser.add_argument("--synthetic-rehearsal-start-index", type=int, default=900000)
     parser.add_argument("--synthetic-cache-dir", type=Path)
+    parser.add_argument(
+        "--aperture-fraction",
+        type=float,
+        default=1.0,
+        help="fraction of finite median-image pixels used by the direct Kepler photometry path",
+    )
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rss-cap-bytes", type=int, default=RSS_CAP_BYTES)
@@ -605,6 +661,8 @@ def main() -> int:
         raise ValueError("batch sizes, epochs, and learning-rate must be positive; weight-decay cannot be negative")
     if args.rss_cap_bytes < 1:
         raise ValueError("rss-cap-bytes must be positive")
+    if not 0.0 < args.aperture_fraction <= 1.0:
+        raise ValueError("aperture-fraction must be in (0, 1]")
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
     if args.paired_ranking_weight < 0.0:
@@ -691,7 +749,12 @@ def main() -> int:
             else _batch_records(training_records, args.batch_size, seed=args.seed + epoch, shuffle=True)
         )
         for batch_records in batch_iterator:
-            batch = _make_batch(root, batch_records, device)
+            batch = _make_batch(
+                root,
+                batch_records,
+                device,
+                aperture_fraction=args.aperture_fraction,
+            )
             for optimizer in optimizers:
                 optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -750,13 +813,27 @@ def main() -> int:
             if global_step % 10 == 0:
                 print(json.dumps({"epoch": epoch, "step": global_step, "loss": losses[-1], "rss_bytes": peak_rss}), flush=True)
         with torch.inference_mode():
-            train_metrics = _metrics(model, root, training_records, device, eval_batch_size)
+            train_metrics = _metrics(
+                model,
+                root,
+                training_records,
+                device,
+                eval_batch_size,
+                aperture_fraction=args.aperture_fraction,
+            )
             peak_rss = max(peak_rss, _rss_bytes())
             if peak_rss > args.rss_cap_bytes:
                 raise MemoryError(
                     f"RSS cap exceeded during train metrics: {peak_rss} > {args.rss_cap_bytes}"
                 )
-            validation_metrics = _metrics(model, root, splits["validation"], device, eval_batch_size)
+            validation_metrics = _metrics(
+                model,
+                root,
+                splits["validation"],
+                device,
+                eval_batch_size,
+                aperture_fraction=args.aperture_fraction,
+            )
             peak_rss = max(peak_rss, _rss_bytes())
             if peak_rss > args.rss_cap_bytes:
                 raise MemoryError(
@@ -788,7 +865,14 @@ def main() -> int:
     if best_state_dict is None:
         raise RuntimeError("no validation checkpoint was produced")
     model.load_state_dict(best_state_dict)
-    test_metrics = _metrics(model, root, splits["test"], device, eval_batch_size)
+    test_metrics = _metrics(
+        model,
+        root,
+        splits["test"],
+        device,
+        eval_batch_size,
+        aperture_fraction=args.aperture_fraction,
+    )
     peak_rss = max(peak_rss, _rss_bytes())
     if peak_rss > args.rss_cap_bytes:
         raise MemoryError(f"RSS cap exceeded during test metrics: {peak_rss} > {args.rss_cap_bytes}")
@@ -822,6 +906,7 @@ def main() -> int:
             "train_only_temporal_summary": args.train_only_temporal_summary,
             "train_only_event_calibration": args.train_only_event_calibration,
             "include_validation_in_training": args.include_validation_in_training,
+            "aperture_fraction": args.aperture_fraction,
         },
         temporary,
     )
@@ -853,6 +938,7 @@ def main() -> int:
         "dataset_counts": {name: len(value) for name, value in splits.items()},
         "training_sample_count": len(training_records),
         "include_validation_in_training": args.include_validation_in_training,
+        "aperture_fraction": args.aperture_fraction,
         "unique_hosts": {name: len({int(record["kepid"]) for record in value}) for name, value in splits.items()},
         "history": history,
         "best_epoch": best_epoch,

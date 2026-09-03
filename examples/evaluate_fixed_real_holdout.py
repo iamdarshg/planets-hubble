@@ -29,9 +29,12 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--aperture-fraction", type=float, default=1.0)
     args = parser.parse_args()
     if args.batch_size < 1:
         raise ValueError("batch-size must be positive")
+    if not 0.0 < args.aperture_fraction <= 1.0:
+        raise ValueError("aperture-fraction must be in (0, 1]")
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
@@ -41,7 +44,14 @@ def main() -> int:
     if len(holdout) != 100:
         raise ValueError(f"expected at least 100 test records, found {len(test_records)}")
     model = _load_model(args.checkpoint, device)
-    metrics = _metrics(model, args.manifest.parent, holdout, device, args.batch_size)
+    metrics = _metrics(
+        model,
+        args.manifest.parent,
+        holdout,
+        device,
+        args.batch_size,
+        aperture_fraction=args.aperture_fraction,
+    )
     report = {
         "status": "pass" if metrics["mean_bce_loss"] is not None and metrics["mean_bce_loss"] < 0.20 else "fail",
         "manifest": str(args.manifest),
@@ -49,6 +59,7 @@ def main() -> int:
         "selection": "first 100 records in manifest test split; fixed and never trained on",
         "device": str(device),
         "batch_size": args.batch_size,
+        "aperture_fraction": args.aperture_fraction,
         "metrics": metrics,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
