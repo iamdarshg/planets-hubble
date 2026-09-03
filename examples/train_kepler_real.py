@@ -455,6 +455,15 @@ def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
         parameter.requires_grad = True
 
 
+def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
+    """Train compact real-domain event heads without changing the backbone."""
+
+    _freeze_except_temporal_summary(model)
+    for module in (model.core.source_photometry_projection, model.core.source_photometry_event):
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+
+
 def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
     """Train only the bounded global event calibration parameters."""
 
@@ -652,6 +661,11 @@ def main() -> int:
         help="freeze every feature head and train only the bounded global event calibration parameters",
     )
     parser.add_argument(
+        "--train-only-event-heads",
+        action="store_true",
+        help="freeze the spatial/temporal backbone and train compact temporal plus source-photometry event heads",
+    )
+    parser.add_argument(
         "--include-validation-in-training",
         action="store_true",
         help="fit on train and validation records together after model selection; the test split remains untouched",
@@ -667,8 +681,15 @@ def main() -> int:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
     if args.paired_ranking_weight < 0.0:
         raise ValueError("paired-ranking-weight cannot be negative")
-    if args.train_only_temporal_summary and args.train_only_event_calibration:
-        raise ValueError("train-only-temporal-summary and train-only-event-calibration are mutually exclusive")
+    if sum(
+        int(value)
+        for value in (
+            args.train_only_temporal_summary,
+            args.train_only_event_calibration,
+            args.train_only_event_heads,
+        )
+    ) > 1:
+        raise ValueError("event-head training modes are mutually exclusive")
     if not 0.0 <= args.label_smoothing < 1.0:
         raise ValueError("label-smoothing must be in [0, 1)")
     random.seed(args.seed)
@@ -698,6 +719,8 @@ def main() -> int:
         _freeze_except_temporal_summary(model)
     if args.train_only_event_calibration:
         _freeze_except_event_calibration(model)
+    if args.train_only_event_heads:
+        _freeze_except_event_heads(model)
     optimizers, optimizer_policy = _build_optimizers(
         model,
         name=args.optimizer,
@@ -905,6 +928,7 @@ def main() -> int:
             "reset_source_photometry_branch": args.reset_source_photometry_branch,
             "train_only_temporal_summary": args.train_only_temporal_summary,
             "train_only_event_calibration": args.train_only_event_calibration,
+            "train_only_event_heads": args.train_only_event_heads,
             "include_validation_in_training": args.include_validation_in_training,
             "aperture_fraction": args.aperture_fraction,
         },
@@ -929,6 +953,7 @@ def main() -> int:
         "loss_mode": args.loss_mode,
         "train_only_temporal_summary": args.train_only_temporal_summary,
         "train_only_event_calibration": args.train_only_event_calibration,
+        "train_only_event_heads": args.train_only_event_heads,
         "synthetic_rehearsal_pairs": args.synthetic_rehearsal_pairs,
         "synthetic_rehearsal_weight": args.synthetic_rehearsal_weight,
         "synthetic_rehearsal_start_index": args.synthetic_rehearsal_start_index,
