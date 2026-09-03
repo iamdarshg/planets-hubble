@@ -9,6 +9,7 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -174,6 +175,47 @@ def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 8, canvas: int = 
     return xy
 
 
+def _generate_pair(
+    generator_config: SyntheticConfig,
+    sample_index: int,
+) -> tuple[list[dict[str, np.ndarray]], list[float], list[tuple[float, float]]]:
+    """Generate one null/injected pair with an isolated deterministic seed."""
+
+    source_x, source_y = _source_position(generator_config, sample_index)
+    bundle_config = replace(
+        generator_config,
+        seed=generator_config.seed + sample_index,
+        source_x=source_x,
+        source_y=source_y,
+    )
+    bundle = SyntheticGenerator(bundle_config).generate()
+    views: list[dict[str, np.ndarray]] = []
+    labels: list[float] = []
+    source_positions: list[tuple[float, float]] = []
+    for view, label in ((bundle.null, 0.0), (bundle.injected, 1.0)):
+        embedded = _embed_compact_view(
+            bundle.as_model_numpy("null" if label == 0.0 else "injected")
+        )
+        # The real Kepler adapter exposes channel 4 as a good-quality mask,
+        # whereas the generator stores an interpolation mask. Convert the
+        # latter to the former at this adapter boundary.
+        raster = embedded["raster"]
+        wavelength_tokens = embedded["wavelength_tokens"]
+        cadence_values = wavelength_tokens[..., 1]
+        cadence_uncertainty = wavelength_tokens[..., 3]
+        wavelength_tokens[..., 6] = _robust_temporal_score(
+            cadence_values,
+            cadence_uncertainty,
+        )
+        embedded["wavelength_tokens"] = wavelength_tokens
+        raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
+        embedded["raster"] = raster
+        views.append(embedded)
+        labels.append(label)
+        source_positions.append((source_x, source_y))
+    return views, labels, source_positions
+
+
 def _make_batch(
     generator_config: SyntheticConfig,
     start_index: int,
@@ -210,38 +252,30 @@ def _make_batch(
         views: list[dict[str, np.ndarray]] = []
         labels: list[float] = []
         source_positions: list[tuple[float, float]] = []
-        for pair_index in range(pair_count):
-            sample_index = start_index + pair_index
-            source_x, source_y = _source_position(generator_config, sample_index)
-            bundle_config = replace(
-                generator_config,
-                seed=generator_config.seed + sample_index,
-                source_x=source_x,
-                source_y=source_y,
+        pair_indices = range(start_index, start_index + pair_count)
+        # Pair generation is independent by construction. Four bounded
+        # workers improve CPU throughput without retaining a second full
+        # dataset or changing the deterministic output order.
+        worker_count = min(4, pair_count)
+        if worker_count == 1:
+            generated_pairs = map(
+                lambda index: _generate_pair(generator_config, index),
+                pair_indices,
             )
-            bundle = SyntheticGenerator(bundle_config).generate()
-            for view, label in ((bundle.null, 0.0), (bundle.injected, 1.0)):
-                embedded = _embed_compact_view(
-                    bundle.as_model_numpy("null" if label == 0.0 else "injected")
-                )
-                # The real Kepler adapter exposes channel 4 as a good-quality
-                # mask, whereas the generator stores an interpolation mask.
-                # Convert the latter to the former at this adapter boundary so
-                # the model sees the same polarity in both domains.
-                raster = embedded["raster"]
-                wavelength_tokens = embedded["wavelength_tokens"]
-                cadence_values = wavelength_tokens[..., 1]
-                cadence_uncertainty = wavelength_tokens[..., 3]
-                wavelength_tokens[..., 6] = _robust_temporal_score(
-                    cadence_values,
-                    cadence_uncertainty,
-                )
-                embedded["wavelength_tokens"] = wavelength_tokens
-                raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
-                embedded["raster"] = raster
-                views.append(embedded)
-                labels.append(label)
-                source_positions.append((source_x, source_y))
+        else:
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            generated_pairs = executor.map(
+                lambda index: _generate_pair(generator_config, index),
+                pair_indices,
+            )
+        try:
+            for pair_views, pair_labels, pair_positions in generated_pairs:
+                views.extend(pair_views)
+                labels.extend(pair_labels)
+                source_positions.extend(pair_positions)
+        finally:
+            if worker_count > 1:
+                executor.shutdown(wait=True)
         cached_arrays = {
             name: np.concatenate([view[name] for view in views], axis=0)
             for name in views[0]
