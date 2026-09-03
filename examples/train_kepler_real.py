@@ -137,7 +137,16 @@ def _normalize_frame_arrays(
     *,
     canvas: int = 32,
     aperture_fraction: float = 1.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     if science.ndim != 3 or science.shape != uncertainty.shape or science.shape != finite.shape:
         raise ValueError(f"invalid TPF arrays: science={science.shape} uncertainty={uncertainty.shape} finite={finite.shape}")
     frames, height, width = science.shape
@@ -183,7 +192,14 @@ def _normalize_frame_arrays(
         aperture_mask[selected] = True
         aperture_mask = aperture_mask.reshape(height, width)
     aperture_valid = valid & aperture_mask[None, :, :]
-    aperture = np.sum(np.where(aperture_valid, science, 0.0), axis=(1, 2)).astype(np.float64)
+    aperture_pixel_count = float(aperture_mask.sum())
+    observed_aperture_count = aperture_valid.sum(axis=(1, 2)).astype(np.float64)
+    aperture_sum = np.sum(np.where(aperture_valid, science, 0.0), axis=(1, 2)).astype(np.float64)
+    # A missing detector pixel must not look like a transit.  Renormalize a
+    # static aperture to its observed-pixel count; this keeps the aperture
+    # flux comparable across cadences with partial finite coverage while
+    # retaining the explicit per-cadence validity channels for the model.
+    aperture = aperture_sum * aperture_pixel_count / np.maximum(observed_aperture_count, 1.0)
     aperture_baseline = float(np.median(aperture[aperture > 0.0])) if np.any(aperture > 0.0) else 1.0
     photometry = np.clip(aperture / max(abs(aperture_baseline), 1.0) - 1.0, -20.0, 20.0).astype(np.float32)
     aperture_error = np.sqrt(
@@ -191,9 +207,24 @@ def _normalize_frame_arrays(
             np.where(aperture_valid, np.square(np.nan_to_num(uncertainty, nan=0.0)), 0.0),
             axis=(1, 2),
         )
-    )
+    ) * np.sqrt(aperture_pixel_count / np.maximum(observed_aperture_count, 1.0))
     photometric_uncertainty = np.clip(aperture_error / max(abs(aperture_baseline), 1.0), 0.0, 20.0).astype(np.float32)
-    return normalized, residual, err, valid.astype(np.float32), quality_ok.astype(np.float32), photometry, photometric_uncertainty
+    # A cadence with fewer than half of the static source pixels available is
+    # too incomplete for an event decision.  Mark it as unavailable while the
+    # normalized aperture above still handles ordinary partial coverage.
+    aperture_coverage = (
+        observed_aperture_count >= max(1.0, np.ceil(aperture_pixel_count * 0.5))
+    ).astype(np.float32)
+    return (
+        normalized,
+        residual,
+        err,
+        valid.astype(np.float32),
+        quality_ok.astype(np.float32),
+        aperture_coverage,
+        photometry,
+        photometric_uncertainty,
+    )
 
 
 def _robust_temporal_score(photometry: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -247,10 +278,15 @@ def _load_full_tpf_lightcurve(
             aperture_mask = np.zeros(ranked.shape[0], dtype=bool)
             aperture_mask[selected] = True
             aperture_mask = aperture_mask.reshape(flux.shape[1:])
-        aperture = np.sum(
+        aperture_pixel_count = float(aperture_mask.sum())
+        observed_aperture_count = (
+            np.isfinite(flux) & aperture_mask[None, :, :]
+        ).sum(axis=(1, 2)).astype(np.float64)
+        aperture_sum = np.sum(
             np.where(np.isfinite(flux) & aperture_mask[None, :, :], flux, 0.0),
             axis=(1, 2),
         ).astype(np.float64)
+        aperture = aperture_sum * aperture_pixel_count / np.maximum(observed_aperture_count, 1.0)
         valid &= aperture > 0.0
         if int(valid.sum()) < 8:
             return None
@@ -322,7 +358,7 @@ def _load_example(
         finite = np.asarray(arrays["finite"], dtype=np.uint8)
         quality = np.asarray(arrays["quality"], dtype=np.int32)
         times = np.asarray(arrays["time"], dtype=np.float64)
-    normalized, residual, err, valid, quality_ok, photometry, photometric_uncertainty = _normalize_frame_arrays(
+    normalized, residual, err, valid, quality_ok, aperture_coverage, photometry, photometric_uncertainty = _normalize_frame_arrays(
         science,
         uncertainty,
         finite,
@@ -394,10 +430,10 @@ def _load_example(
             np.full(frames, 80.0 / 650.0, dtype=np.float32),
             np.full(frames, np.log10(max(cadence_seconds, 1.0)) / 5.0, dtype=np.float32),
             temporal_score,
-            # Match the synthetic validity-mask semantics. Quality flags are
-            # retained as a separate coverage feature; they do not erase an
-            # otherwise finite detector measurement from the photometry path.
-            valid_fraction,
+            # Match the synthetic validity-mask semantics for the source
+            # aperture. Quality flags and all-pixel coverage remain separate;
+            # they do not erase an otherwise finite detector measurement.
+            aperture_coverage,
         ),
         axis=-1,
     )[:, None, :]
@@ -473,10 +509,10 @@ def _make_batch(
         local_time[index, 0, :count] = example["local_time"]  # type: ignore[index]
         long_time[index, 0] = example["long_time"]  # type: ignore[index]
         objects[index, 0] = example["object_tokens"]  # type: ignore[index]
-        # The last wavelength token is the real adapter's finite-data
-        # validity fraction. A cadence with no finite detector pixels is
-        # padding from the temporal model's point of view: allowing it into
-        # the recurrent/convolutional path creates a false zero-flux step.
+        # The last wavelength token is the source-aperture coverage gate. A
+        # cadence with too few finite source pixels is padding from the
+        # temporal model's point of view: allowing it into the recurrent or
+        # convolutional path creates a false zero-flux step.
         # Finite measurements with non-zero Kepler quality flags remain
         # usable and are retained through the separate coverage channels.
         valid_cadence = (
