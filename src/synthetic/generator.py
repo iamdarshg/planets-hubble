@@ -55,6 +55,11 @@ class SyntheticGenerator:
         brightness_factors, brightness_scales = self._stellar_brightness_factors(rng)
         field_stars["brightness_factors"] = brightness_factors
         field_stars["brightness_noise_scales"] = brightness_scales
+        field_event_factors, field_event_metadata = self._field_event_factors(
+            rng, mids, starts, ends, field_stars
+        )
+        field_stars["event_factors"] = field_event_factors
+        field_stars["field_event_metadata"] = field_event_metadata
         latent_null, latent_injected, event_mask, depth = self._latent_signals(
             mids, starts, ends, wavelengths
         )
@@ -158,6 +163,10 @@ class SyntheticGenerator:
             "time_system": "BJD_TDB",
             "field_star_count": len(field_stars["positions"]),
             "target_star_index": 0,
+            "field_planet_event_count": int(sum(
+                bool(event["event_present"]) for event in field_event_metadata
+            )),
+            "field_planet_event_model": "exposure_integrated_uniform_disk_transits_shared_by_pair",
             "stellar_brightness_model": "independent per-star AR(1) frame noise shared by null/injected pair",
             "stellar_brightness_noise_sigma": config.stellar_brightness_noise_sigma,
             "stellar_brightness_ar1": config.stellar_brightness_ar1,
@@ -174,6 +183,12 @@ class SyntheticGenerator:
                     "y": float(position[1]),
                     "flux_ratio": float(field_stars["flux_ratios"][index]),
                     "has_exoplanet": bool(field_stars["planet_hosts"][index]),
+                    "field_planet_event_present": bool(
+                        field_event_metadata[index]["event_present"]
+                    ),
+                    "field_planet_event_depth": float(
+                        field_event_metadata[index]["maximum_depth"]
+                    ),
                 }
                 for index, position in enumerate(field_stars["positions"])
             ],
@@ -490,7 +505,23 @@ class SyntheticGenerator:
                 "brightness_factors must be [visits, local_steps, field_star_count], "
                 f"got {brightness_factors.shape}"
             )
-        weighted_flux_ratios = brightness_factors * np.asarray(stars["flux_ratios"], dtype=np.float32)[None, None, :]
+        event_factors = np.asarray(
+            stars.get(
+                "event_factors",
+                np.ones((*measurements.shape[:2], len(stars["positions"])), dtype=np.float32),
+            ),
+            dtype=np.float32,
+        )
+        if event_factors.shape != brightness_factors.shape:
+            raise ValueError(
+                "event_factors must be [visits, local_steps, field_star_count], "
+                f"got {event_factors.shape}"
+            )
+        weighted_flux_ratios = (
+            brightness_factors
+            * event_factors
+            * np.asarray(stars["flux_ratios"], dtype=np.float32)[None, None, :]
+        )
         field_psf = np.einsum("vls,vlshw->vlhw", weighted_flux_ratios, star_psf)
         target_psf = star_psf[:, :, 0]
         target_brightness = brightness_factors[..., 0]
@@ -877,6 +908,103 @@ class SyntheticGenerator:
                     # create an unphysical negative or saturated star.
                     factors[visit, step, star_index] = float(np.clip(1.0 + state, 0.5, 1.5))
         return factors, scales
+
+    def _field_event_factors(
+        self,
+        rng: np.random.Generator,
+        mids: np.ndarray,
+        starts: np.ndarray,
+        ends: np.ndarray,
+        field_stars: dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, tuple[dict[str, object], ...]]:
+        """Render background-planet transits into field-star brightness.
+
+        The supervised target event remains in ``_latent_signals``.  This
+        separate path adds realistic, unlabeled astrophysical variability to
+        non-target stars only.  Each event is integrated over the actual
+        exposure interval using the same quadrature and analytic disk overlap
+        as the target transit, and the resulting factors are reused for both
+        counterfactual views.
+        """
+
+        config = self.config
+        quadrature_nodes, quadrature_weights = np.polynomial.legendre.leggauss(
+            config.quadrature_order
+        )
+        sample_times = (starts[..., None] + ends[..., None]) / 2.0 + (
+            (ends - starts)[..., None] / 2.0
+        ) * quadrature_nodes
+        weights = quadrature_weights / 2.0
+        factors = np.ones(
+            (config.visits, config.local_steps, config.field_star_count),
+            dtype=np.float32,
+        )
+        metadata: list[dict[str, object]] = [
+            {
+                "event_present": False,
+                "period_days": None,
+                "epoch_bjd_tdb": None,
+                "duration_hours": None,
+                "radius_ratio": None,
+                "impact_parameter": None,
+                "maximum_depth": 0.0,
+            }
+            for _ in range(config.field_star_count)
+        ]
+        if config.field_star_count <= 1:
+            return factors, tuple(metadata)
+
+        observation_start = float(np.min(starts))
+        observation_end = float(np.max(ends))
+        for star_index in range(1, config.field_star_count):
+            if not bool(field_stars["planet_hosts"][star_index]):
+                continue
+            period = float(
+                rng.uniform(
+                    config.field_planet_period_days_min,
+                    config.field_planet_period_days_max,
+                )
+            )
+            duration_hours = float(
+                rng.uniform(
+                    config.field_planet_duration_hours_min,
+                    config.field_planet_duration_hours_max,
+                )
+            )
+            radius_ratio = float(
+                rng.uniform(
+                    config.field_planet_radius_ratio_min,
+                    config.field_planet_radius_ratio_max,
+                )
+            )
+            impact_parameter = float(
+                rng.uniform(0.0, config.field_planet_impact_parameter_max)
+            )
+            epoch = float(rng.uniform(observation_start, observation_end))
+            duration_days = duration_hours / 24.0
+            delta = self._periodic_delta(sample_times, epoch, period)
+            velocity = 2.0 * np.sqrt(
+                max((1.0 + radius_ratio) ** 2 - impact_parameter**2, 1e-12)
+            ) / duration_days
+            separation = np.sqrt(
+                impact_parameter**2 + (velocity * delta) ** 2
+            )
+            drop = self._circle_overlap_fraction(separation, radius_ratio)
+            averaged_drop = np.sum(drop * weights, axis=-1)
+            factors[..., star_index] = np.clip(1.0 - averaged_drop, 0.0, 1.0).astype(
+                np.float32
+            )
+            event_present = bool(np.any(drop > 1e-8))
+            metadata[star_index] = {
+                "event_present": event_present,
+                "period_days": period,
+                "epoch_bjd_tdb": epoch,
+                "duration_hours": duration_hours,
+                "radius_ratio": radius_ratio,
+                "impact_parameter": impact_parameter,
+                "maximum_depth": float(np.max(averaged_drop)),
+            }
+        return factors, tuple(metadata)
 
     def _objects(self, field_stars: dict[str, np.ndarray] | None = None) -> tuple[np.ndarray, np.ndarray, tuple[dict[str, object], ...]]:
         config = self.config

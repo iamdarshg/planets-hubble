@@ -49,6 +49,13 @@ class SyntheticConfig:
     # represented in both the raster and object-token context.
     field_star_count: int = 1
     field_planet_probability: float = 0.0
+    field_planet_period_days_min: float = 1.5
+    field_planet_period_days_max: float = 30.0
+    field_planet_duration_hours_min: float = 1.5
+    field_planet_duration_hours_max: float = 8.0
+    field_planet_radius_ratio_min: float = 0.01
+    field_planet_radius_ratio_max: float = 0.08
+    field_planet_impact_parameter_max: float = 0.9
     field_star_flux_ratio_min: float = 0.03
     field_star_flux_ratio_max: float = 0.30
     field_star_min_separation_pixels: float = 3.0
@@ -169,6 +176,26 @@ class SyntheticConfig:
             raise ValueError("binary_secondary_flux_ratio must be non-negative")
         if not 0.0 <= self.field_planet_probability <= 1.0:
             raise ValueError("field_planet_probability must be in [0, 1]")
+        if any(
+            value <= 0.0
+            for value in (
+                self.field_planet_period_days_min,
+                self.field_planet_period_days_max,
+                self.field_planet_duration_hours_min,
+                self.field_planet_duration_hours_max,
+                self.field_planet_radius_ratio_min,
+                self.field_planet_radius_ratio_max,
+            )
+        ):
+            raise ValueError("field planet physical bounds must be positive")
+        if self.field_planet_period_days_max < self.field_planet_period_days_min:
+            raise ValueError("field planet period bounds must be ordered")
+        if self.field_planet_duration_hours_max < self.field_planet_duration_hours_min:
+            raise ValueError("field planet duration bounds must be ordered")
+        if self.field_planet_radius_ratio_max < self.field_planet_radius_ratio_min:
+            raise ValueError("field planet radius-ratio bounds must be ordered")
+        if not 0.0 <= self.field_planet_impact_parameter_max < 1.0:
+            raise ValueError("field planet impact-parameter maximum must be in [0, 1)")
         if self.field_star_flux_ratio_min <= 0.0 or self.field_star_flux_ratio_max < self.field_star_flux_ratio_min:
             raise ValueError("field star flux-ratio bounds must be positive and ordered")
         if self.field_star_min_separation_pixels < 0.0:

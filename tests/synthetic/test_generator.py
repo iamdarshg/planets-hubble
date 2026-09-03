@@ -71,6 +71,52 @@ def test_stellar_brightness_noise_is_enabled_bounded_and_reproducible() -> None:
     assert quiet.source_metadata["stellar_brightness_factor_std"] == 0.0
 
 
+def test_field_planet_hosts_have_exposure_integrated_events_in_shared_raster_scene() -> None:
+    config = small_config(
+        seed=41,
+        visits=2,
+        local_steps=16,
+        field_star_count=6,
+        field_planet_probability=1.0,
+        field_planet_radius_ratio_min=0.06,
+        field_planet_radius_ratio_max=0.06,
+        field_planet_duration_hours_min=6.0,
+        field_planet_duration_hours_max=6.0,
+    )
+    first = SyntheticGenerator(config).generate()
+    second = SyntheticGenerator(config).generate()
+
+    assert first.source_metadata["field_planet_event_model"].startswith(
+        "exposure_integrated"
+    )
+    assert first.source_metadata["field_planet_event_count"] > 0
+    assert any(
+        item["has_exoplanet"] and item["field_planet_event_present"]
+        for item in first.source_metadata["field_stars"][1:]
+    )
+    assert all(
+        0.0 <= item["field_planet_event_depth"] <= 1.0
+        for item in first.source_metadata["field_stars"]
+    )
+    np.testing.assert_array_equal(first.null.raster, second.null.raster)
+    np.testing.assert_array_equal(first.injected.raster, second.injected.raster)
+    # The background-star factors are shared by the counterfactual pair; only
+    # the target scalar signal is allowed to differ in the wavelength path.
+    np.testing.assert_array_equal(first.null.raster[3:], first.injected.raster[3:])
+
+
+def test_field_planet_probability_zero_has_no_background_events() -> None:
+    bundle = SyntheticGenerator(
+        small_config(seed=43, field_star_count=8, field_planet_probability=0.0)
+    ).generate()
+
+    assert bundle.source_metadata["field_planet_event_count"] == 0
+    assert all(
+        not item["has_exoplanet"]
+        for item in bundle.source_metadata["field_stars"][1:]
+    )
+
+
 def test_exposure_integrated_transit_has_expected_depth_and_timing() -> None:
     config = small_config(
         visits=1,
