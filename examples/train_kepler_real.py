@@ -206,7 +206,11 @@ def _load_full_tpf_lightcurve(raw_tpf_dir: str, filename: str) -> tuple[np.ndarr
         finite_aperture = aperture[valid]
         center = float(np.median(finite_times))
         scaled_time = (finite_times - center) / max(float(np.ptp(finite_times)), 1.0)
-        degree = min(3, int(valid.sum()) - 1)
+        # A quarter contains enough valid cadences to support a modestly
+        # higher-order baseline. Keep the order bounded so the fit follows
+        # broad instrumental/stellar curvature without becoming a local
+        # transit interpolator.
+        degree = min(6, int(valid.sum()) - 1)
         coefficients = np.polyfit(scaled_time, finite_aperture, degree)
         baseline = np.full(times.shape, np.nan, dtype=np.float64)
         baseline[valid] = np.polyval(coefficients, scaled_time)
