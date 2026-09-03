@@ -278,15 +278,17 @@ def _make_batch(root: Path, records: list[dict[str, object]], device: torch.devi
         local_time[index, 0, :count] = example["local_time"]  # type: ignore[index]
         long_time[index, 0] = example["long_time"]  # type: ignore[index]
         objects[index, 0] = example["object_tokens"]  # type: ignore[index]
-        step_mask[index, 0, :count] = True
         # The last wavelength token is the real adapter's finite-data
-        # validity fraction. Do not present invalid/zero-filled cadences as
-        # photometry: they otherwise look like an artificial -20 transit
-        # score to the event heads. Quality flags remain available through
-        # the separate coverage channels.
-        wavelength_mask[index, 0, :count, 0] = (
+        # validity fraction. A cadence with no finite detector pixels is
+        # padding from the temporal model's point of view: allowing it into
+        # the recurrent/convolutional path creates a false zero-flux step.
+        # Finite measurements with non-zero Kepler quality flags remain
+        # usable and are retained through the separate coverage channels.
+        valid_cadence = (
             np.asarray(example["wavelength_tokens"], dtype=np.float32)[:, 0, 7] > 0.0
         )
+        step_mask[index, 0, :count] = valid_cadence
+        wavelength_mask[index, 0, :count, 0] = valid_cadence
     # Keep the optimizer's master parameters and input staging tensors in
     # FP32. CUDA autocast below is compute-only.
     floating = torch.float32
