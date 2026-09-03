@@ -309,6 +309,10 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
         "core.temporal_shape_event.0.bias",
         "core.temporal_shape_event.2.weight",
         "core.temporal_shape_event.2.bias",
+        "core.temporal_robust_event.0.weight",
+        "core.temporal_robust_event.0.bias",
+        "core.temporal_robust_event.2.weight",
+        "core.temporal_robust_event.2.bias",
         "core.temporal_sequence_event.0.weight",
         "core.temporal_sequence_event.0.bias",
         "core.temporal_sequence_event.2.weight",
@@ -346,6 +350,7 @@ def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
     for module in (
         model.core.temporal_summary_event,
         model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
         model.core.temporal_sequence_event,
         model.core.temporal_sequence_projection,
     ):

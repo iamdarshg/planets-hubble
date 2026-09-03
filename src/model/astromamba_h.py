@@ -774,6 +774,18 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_shape_event[-1].weight)
         nn.init.zeros_(self.temporal_shape_event[-1].bias)
+        # A duration-independent detector searches all contiguous cadence
+        # windows instead of assuming that the event is centered in the
+        # local sequence.  Its zero-initialized output preserves predictions
+        # from older checkpoints until it is explicitly trained on the real
+        # observation domain.
+        self.temporal_robust_event = nn.Sequential(
+            nn.Linear(26, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+        )
+        nn.init.zeros_(self.temporal_robust_event[-1].weight)
+        nn.init.zeros_(self.temporal_robust_event[-1].bias)
         # A small sequence-local detector complements the hand-built summary
         # statistics with learned ingress/egress and localized-dip patterns.
         # Its final projection is zero-initialized for checkpoint compatibility
@@ -1202,6 +1214,44 @@ class AstroMambaH(nn.Module):
             dim=-1,
         )
         temporal_shape_event_logits = self.temporal_shape_event(temporal_shape).squeeze(-1)
+        robust_features = [
+            (score_mean / 5.0).clamp(-20.0, 20.0),
+            (score_std / 5.0).clamp(0.0, 20.0),
+            (score_masked_min / 5.0).clamp(-20.0, 20.0),
+            (score_masked_max / 5.0).clamp(-20.0, 20.0),
+            (delta_mean * 100.0).clamp(-20.0, 20.0),
+            (delta_std * 100.0).clamp(0.0, 20.0),
+            (delta_masked_min * 100.0).clamp(-20.0, 20.0),
+            (delta_masked_max * 100.0).clamp(-20.0, 20.0),
+        ]
+        # Each window statistic is invariant to the event's position in the
+        # cutout. Invalid/padded windows never participate in minima or
+        # fractions, so short and quality-flagged sequences remain bounded.
+        for window in range(1, 7):
+            if score.shape[-1] < window:
+                robust_features.extend((
+                    torch.zeros_like(score_mean),
+                    torch.zeros_like(delta_mean),
+                    torch.zeros_like(score_mean),
+                ))
+                continue
+            window_mask = summary_mask.unfold(-1, window, 1)
+            valid_windows = window_mask.sum(dim=-1) >= float(window)
+            score_windows = score.unfold(-1, window, 1).mean(dim=-1)
+            delta_windows = delta.unfold(-1, window, 1).mean(dim=-1)
+            score_min = score_windows.masked_fill(~valid_windows, 20.0).amin(dim=(1, 2))
+            delta_min = delta_windows.masked_fill(~valid_windows, 0.0).amin(dim=(1, 2))
+            valid_count = valid_windows.sum(dim=(1, 2)).clamp_min(1.0)
+            negative_fraction = (
+                (score_windows < -1.0).to(score.dtype) * valid_windows
+            ).sum(dim=(1, 2)) / valid_count
+            robust_features.extend((
+                (score_min / 5.0).clamp(-20.0, 20.0),
+                (delta_min * 100.0).clamp(-20.0, 20.0),
+                negative_fraction.clamp(0.0, 1.0),
+            ))
+        temporal_robust = torch.stack(robust_features, dim=-1)
+        temporal_robust_event_logits = self.temporal_robust_event(temporal_robust).squeeze(-1)
         sequence = source_photometry_values.reshape(batch * visits, score.shape[-1], 2).transpose(1, 2)
         sequence_features = self.temporal_sequence_event(sequence).squeeze(-1)
         sequence_max = sequence_features.new_zeros(sequence_features.shape)
@@ -1227,7 +1277,7 @@ class AstroMambaH(nn.Module):
             source_weight=self.event_source_weight.clamp(0.0, 2.0),
             backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
             photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
-        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_sequence_event_logits
+        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_sequence_event_logits
         global_event_logits = global_event_logits * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
