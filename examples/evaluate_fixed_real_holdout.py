@@ -30,11 +30,17 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--aperture-fraction", type=float, default=1.0)
+    parser.add_argument("--raw-tpf-dir", type=Path)
+    parser.add_argument("--full-tpf-detrend", action="store_true")
     args = parser.parse_args()
     if args.batch_size < 1:
         raise ValueError("batch-size must be positive")
     if not 0.0 < args.aperture_fraction <= 1.0:
         raise ValueError("aperture-fraction must be in (0, 1]")
+    if args.full_tpf_detrend and args.raw_tpf_dir is None:
+        raise ValueError("full-tpf-detrend requires --raw-tpf-dir")
+    if args.full_tpf_detrend and not args.raw_tpf_dir.is_dir():
+        raise FileNotFoundError(args.raw_tpf_dir)
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
@@ -51,6 +57,8 @@ def main() -> int:
         device,
         args.batch_size,
         aperture_fraction=args.aperture_fraction,
+        raw_tpf_dir=args.raw_tpf_dir,
+        full_tpf_detrend=args.full_tpf_detrend,
     )
     report = {
         "status": "pass" if metrics["mean_bce_loss"] is not None and metrics["mean_bce_loss"] < 0.20 else "fail",
@@ -60,6 +68,8 @@ def main() -> int:
         "device": str(device),
         "batch_size": args.batch_size,
         "aperture_fraction": args.aperture_fraction,
+        "full_tpf_detrend": args.full_tpf_detrend,
+        "raw_tpf_dir": str(args.raw_tpf_dir) if args.raw_tpf_dir is not None else None,
         "metrics": metrics,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

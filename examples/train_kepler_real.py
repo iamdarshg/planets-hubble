@@ -16,6 +16,7 @@ import os
 import random
 import sys
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -180,12 +181,79 @@ def _robust_temporal_score(photometry: np.ndarray, uncertainty: np.ndarray) -> n
     return np.clip((photometry - center) / scale, -20.0, 20.0).astype(np.float32)
 
 
+@lru_cache(maxsize=16)
+def _load_full_tpf_lightcurve(raw_tpf_dir: str, filename: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Load one bounded full-quarter aperture light curve for local detrending."""
+
+    path = Path(raw_tpf_dir) / filename
+    if not path.is_file():
+        return None
+    try:
+        from astropy.io import fits
+
+        with fits.open(path, memmap=False) as hdul:
+            table = hdul[1].data
+            times = np.asarray(table["TIME"], dtype=np.float64)
+            flux = np.asarray(table["FLUX"], dtype=np.float32)
+            if not np.isfinite(flux).any():
+                flux = np.asarray(table["RAW_CNTS"], dtype=np.float32)
+        valid = np.isfinite(times) & np.isfinite(flux).any(axis=(1, 2))
+        aperture = np.sum(np.where(np.isfinite(flux), flux, 0.0), axis=(1, 2)).astype(np.float64)
+        valid &= aperture > 0.0
+        if int(valid.sum()) < 8:
+            return None
+        finite_times = times[valid]
+        finite_aperture = aperture[valid]
+        center = float(np.median(finite_times))
+        scaled_time = (finite_times - center) / max(float(np.ptp(finite_times)), 1.0)
+        degree = min(3, int(valid.sum()) - 1)
+        coefficients = np.polyfit(scaled_time, finite_aperture, degree)
+        baseline = np.full(times.shape, np.nan, dtype=np.float64)
+        baseline[valid] = np.polyval(coefficients, scaled_time)
+        baseline[valid] = np.maximum(baseline[valid], 1.0)
+        return times, aperture, baseline, valid
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _full_tpf_detrended_photometry(
+    root: Path,
+    record: dict[str, object],
+    local_times: np.ndarray,
+    *,
+    raw_tpf_dir: Path,
+) -> np.ndarray | None:
+    provenance = record.get("provenance")
+    if not isinstance(provenance, dict):
+        return None
+    tpf_url = provenance.get("tpf_url")
+    if not isinstance(tpf_url, str) or not tpf_url:
+        return None
+    filename = tpf_url.rsplit("/", 1)[-1]
+    loaded = _load_full_tpf_lightcurve(str(raw_tpf_dir.resolve()), filename)
+    if loaded is None:
+        return None
+    full_times, aperture, baseline, valid = loaded
+    indices = np.asarray(
+        [int(np.nanargmin(np.abs(full_times - value))) for value in local_times],
+        dtype=np.int64,
+    )
+    local_valid = valid[indices] & np.isfinite(baseline[indices])
+    detrended = np.zeros(local_times.shape, dtype=np.float32)
+    detrended[local_valid] = (
+        aperture[indices[local_valid]] / baseline[indices[local_valid]] - 1.0
+    ).astype(np.float32)
+    return np.clip(detrended, -20.0, 20.0)
+
+
 def _load_example(
     root: Path,
     record: dict[str, object],
     *,
     canvas: int = 32,
     aperture_fraction: float = 1.0,
+    raw_tpf_dir: Path | None = None,
+    full_tpf_detrend: bool = False,
 ) -> dict[str, np.ndarray | float | int | str]:
     with np.load(root / Path(str(record["path"])), allow_pickle=False) as arrays:
         science = np.asarray(arrays["science"], dtype=np.float32)
@@ -201,6 +269,15 @@ def _load_example(
         canvas=canvas,
         aperture_fraction=aperture_fraction,
     )
+    if full_tpf_detrend and raw_tpf_dir is not None:
+        detrended = _full_tpf_detrended_photometry(
+            root,
+            record,
+            times,
+            raw_tpf_dir=raw_tpf_dir,
+        )
+        if detrended is not None:
+            photometry = detrended
     temporal_score = _robust_temporal_score(photometry, photometric_uncertainty)
     frames, height, width = normalized.shape
     raster = np.zeros((frames, 6, canvas, canvas), dtype=np.float32)
@@ -298,8 +375,19 @@ def _make_batch(
     device: torch.device,
     *,
     aperture_fraction: float = 1.0,
+    raw_tpf_dir: Path | None = None,
+    full_tpf_detrend: bool = False,
 ) -> AstroMambaHTrainingBatch:
-    examples = [_load_example(root, record, aperture_fraction=aperture_fraction) for record in records]
+    examples = [
+        _load_example(
+            root,
+            record,
+            aperture_fraction=aperture_fraction,
+            raw_tpf_dir=raw_tpf_dir,
+            full_tpf_detrend=full_tpf_detrend,
+        )
+        for record in records
+    ]
     batch_size = len(examples)
     frames = max(int(example["raster"].shape[0]) for example in examples)  # type: ignore[union-attr]
     raster = np.zeros((batch_size, 1, frames, 6, 32, 32), dtype=np.float32)
@@ -491,6 +579,8 @@ def _metrics(
     batch_size: int,
     *,
     aperture_fraction: float = 1.0,
+    raw_tpf_dir: Path | None = None,
+    full_tpf_detrend: bool = False,
 ) -> dict[str, object]:
     model.eval()
     probabilities: list[float] = []
@@ -498,7 +588,14 @@ def _metrics(
     losses: list[float] = []
     with torch.inference_mode():
         for batch_records in _batch_records(records, batch_size, seed=0, shuffle=False):
-            batch = _make_batch(root, batch_records, device, aperture_fraction=aperture_fraction)
+            batch = _make_batch(
+                root,
+                batch_records,
+                device,
+                aperture_fraction=aperture_fraction,
+                raw_tpf_dir=raw_tpf_dir,
+                full_tpf_detrend=full_tpf_detrend,
+            )
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
             logits = output["global_event_logits"].float().reshape(-1)
@@ -647,6 +744,16 @@ def main() -> int:
         default=1.0,
         help="fraction of finite median-image pixels used by the direct Kepler photometry path",
     )
+    parser.add_argument(
+        "--raw-tpf-dir",
+        type=Path,
+        help="retained Kepler TPF directory used by the optional full-quarter detrending path",
+    )
+    parser.add_argument(
+        "--full-tpf-detrend",
+        action="store_true",
+        help="detrend local photometry against a degree-3 fit to the retained full TPF quarter",
+    )
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--rss-cap-bytes", type=int, default=RSS_CAP_BYTES)
@@ -682,6 +789,10 @@ def main() -> int:
         raise ValueError("rss-cap-bytes must be positive")
     if not 0.0 < args.aperture_fraction <= 1.0:
         raise ValueError("aperture-fraction must be in (0, 1]")
+    if args.full_tpf_detrend and args.raw_tpf_dir is None:
+        raise ValueError("full-tpf-detrend requires --raw-tpf-dir")
+    if args.full_tpf_detrend and not args.raw_tpf_dir.is_dir():
+        raise FileNotFoundError(args.raw_tpf_dir)
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
     if args.paired_ranking_weight < 0.0:
@@ -782,6 +893,8 @@ def main() -> int:
                 batch_records,
                 device,
                 aperture_fraction=args.aperture_fraction,
+                raw_tpf_dir=args.raw_tpf_dir,
+                full_tpf_detrend=args.full_tpf_detrend,
             )
             for optimizer in optimizers:
                 optimizer.zero_grad(set_to_none=True)
@@ -848,6 +961,8 @@ def main() -> int:
                 device,
                 eval_batch_size,
                 aperture_fraction=args.aperture_fraction,
+                raw_tpf_dir=args.raw_tpf_dir,
+                full_tpf_detrend=args.full_tpf_detrend,
             )
             peak_rss = max(peak_rss, _rss_bytes())
             if peak_rss > args.rss_cap_bytes:
@@ -861,6 +976,8 @@ def main() -> int:
                 device,
                 eval_batch_size,
                 aperture_fraction=args.aperture_fraction,
+                raw_tpf_dir=args.raw_tpf_dir,
+                full_tpf_detrend=args.full_tpf_detrend,
             )
             peak_rss = max(peak_rss, _rss_bytes())
             if peak_rss > args.rss_cap_bytes:
@@ -900,6 +1017,8 @@ def main() -> int:
         device,
         eval_batch_size,
         aperture_fraction=args.aperture_fraction,
+        raw_tpf_dir=args.raw_tpf_dir,
+        full_tpf_detrend=args.full_tpf_detrend,
     )
     peak_rss = max(peak_rss, _rss_bytes())
     if peak_rss > args.rss_cap_bytes:
@@ -936,6 +1055,8 @@ def main() -> int:
             "train_only_event_heads": args.train_only_event_heads,
             "include_validation_in_training": args.include_validation_in_training,
             "aperture_fraction": args.aperture_fraction,
+            "full_tpf_detrend": args.full_tpf_detrend,
+            "raw_tpf_dir": str(args.raw_tpf_dir) if args.raw_tpf_dir is not None else None,
         },
         temporary,
     )
@@ -969,6 +1090,8 @@ def main() -> int:
         "training_sample_count": len(training_records),
         "include_validation_in_training": args.include_validation_in_training,
         "aperture_fraction": args.aperture_fraction,
+        "full_tpf_detrend": args.full_tpf_detrend,
+        "raw_tpf_dir": str(args.raw_tpf_dir) if args.raw_tpf_dir is not None else None,
         "unique_hosts": {name: len({int(record["kepid"]) for record in value}) for name, value in splits.items()},
         "history": history,
         "best_epoch": best_epoch,
