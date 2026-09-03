@@ -690,6 +690,8 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
     for module in (model.core.source_photometry_projection, model.core.source_photometry_event):
         for parameter in module.parameters():
             parameter.requires_grad = True
+    for parameter in model.core.event_evidence_calibration.parameters():
+        parameter.requires_grad = True
 
 
 def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
