@@ -269,6 +269,7 @@ def _load_example(
         canvas=canvas,
         aperture_fraction=aperture_fraction,
     )
+    temporal_score_photometry = photometry
     if full_tpf_detrend and raw_tpf_dir is not None:
         detrended = _full_tpf_detrended_photometry(
             root,
@@ -277,8 +278,11 @@ def _load_example(
             raw_tpf_dir=raw_tpf_dir,
         )
         if detrended is not None:
-            photometry = detrended
-    temporal_score = _robust_temporal_score(photometry, photometric_uncertainty)
+            temporal_score_photometry = detrended
+    temporal_score = _robust_temporal_score(
+        temporal_score_photometry,
+        photometric_uncertainty,
+    )
     frames, height, width = normalized.shape
     raster = np.zeros((frames, 6, canvas, canvas), dtype=np.float32)
     y0 = (canvas - height) // 2
