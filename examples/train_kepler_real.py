@@ -604,6 +604,10 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
         "core.temporal_sequence_projection.0.bias",
         "core.temporal_sequence_projection.2.weight",
         "core.temporal_sequence_projection.2.bias",
+        "core.event_evidence_calibration.0.weight",
+        "core.event_evidence_calibration.0.bias",
+        "core.event_evidence_calibration.2.weight",
+        "core.event_evidence_calibration.2.bias",
     }
     unexpected_missing = set(result.missing_keys) - allowed_missing
     if unexpected_missing or result.unexpected_keys:
@@ -689,7 +693,7 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
 
 
 def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
-    """Train only the bounded global event calibration parameters."""
+    """Train only the bounded global event calibration parameters and head."""
 
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -699,6 +703,8 @@ def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
         model.core.event_backbone_weight,
         model.core.event_photometry_weight,
     ):
+        parameter.requires_grad = True
+    for parameter in model.core.event_evidence_calibration.parameters():
         parameter.requires_grad = True
 
 

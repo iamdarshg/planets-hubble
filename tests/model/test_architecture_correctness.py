@@ -63,6 +63,9 @@ def test_model_keeps_source_identity_and_emits_level_specific_logits() -> None:
     assert outputs["source_event_logits"].shape == (1, config.source_top_k)
     assert outputs["visit_event_logits"].shape == (1, 2)
     assert outputs["global_event_logits"].shape == (1,)
+    assert outputs["event_evidence"].shape == (1, 9)
+    assert outputs["event_calibration_logit"].shape == (1,)
+    assert torch.allclose(outputs["event_calibration_logit"], torch.zeros(1))
     assert outputs["source_logits"].shape[:3] == (1, 2, 3)
     assert outputs["head_logits"]["event"].shape == (1,)
     assert outputs["orbit"]["transit_time_offset_by_source"].shape == (1, config.source_top_k)
@@ -111,6 +114,18 @@ def test_global_event_logit_uses_source_conditioned_evidence() -> None:
 
     assert result.shape == (1,)
     assert result.item() < 0.0
+
+
+def test_zero_initialized_event_calibrator_preserves_base_logit() -> None:
+    config = tiny_config()
+    model = AstroMambaH(config).eval()
+    with torch.no_grad():
+        outputs = model(make_inputs(config, visits=1, steps=2))
+    assert torch.allclose(
+        outputs["global_event_logits"],
+        outputs["base_global_event_logits"],
+        atol=1.0e-6,
+    )
 
 
 def test_persistent_anchors_choose_a_valid_reference_frame() -> None:

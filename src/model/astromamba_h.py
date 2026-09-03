@@ -815,6 +815,20 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_sequence_projection[-1].weight)
         nn.init.zeros_(self.temporal_sequence_projection[-1].bias)
+        # The evidence paths above are intentionally additive so each one can
+        # be supervised independently.  Their raw sum is not, however, a
+        # calibrated probability: a few correlated paths can amplify one
+        # another while a contradictory source-conditioned path is still
+        # present.  This compact residual calibrator learns interactions among
+        # the already-computed event logits.  Its last layer starts at zero so
+        # loading a pre-calibrator checkpoint preserves its predictions.
+        self.event_evidence_calibration = nn.Sequential(
+            nn.Linear(9, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.event_evidence_calibration[-1].weight)
+        nn.init.zeros_(self.event_evidence_calibration[-1].bias)
         self.cross_modal_fusion = nn.ModuleList(
             CrossModalBlock(config) for _ in range(config.fusion_blocks)
         )
@@ -892,6 +906,7 @@ class AstroMambaH(nn.Module):
             "source_photometry": nn.ModuleList(
                 [self.source_photometry_projection, self.source_photometry_event]
             ),
+            "event_evidence_calibration": self.event_evidence_calibration,
             "object_context_encoder": self.object_context_encoder,
             "geometry_coverage_encoder": self.geometry_coverage_encoder,
             "cross_modal_fusion": self.cross_modal_fusion,
@@ -1332,7 +1347,7 @@ class AstroMambaH(nn.Module):
         source_visit_event_logits = visit_source_event_logits.permute(0, 2, 1)
         visit_event_logits = visit_source_event_logits.max(dim=2).values
         pooled_backbone_event_logits = self.prediction_heads["global_event"](pooled_long).squeeze(-1)
-        global_event_logits = combine_source_conditioned_event_logits(
+        base_global_event_logits = combine_source_conditioned_event_logits(
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
@@ -1340,7 +1355,24 @@ class AstroMambaH(nn.Module):
             backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
             photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
         ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits
-        global_event_logits = global_event_logits * self.event_logit_scale.clamp(0.25, 4.0)
+        event_evidence = torch.stack(
+            (
+                pooled_backbone_event_logits,
+                source_event_logits[:, 0],
+                source_photometry_event_logits[:, 0],
+                visit_event_logits.max(dim=1).values,
+                temporal_summary_event_logits,
+                temporal_shape_event_logits,
+                temporal_robust_event_logits,
+                temporal_matched_event_logits,
+                temporal_sequence_event_logits,
+            ),
+            dim=-1,
+        )
+        event_calibration_logit = self.event_evidence_calibration(event_evidence).squeeze(-1)
+        global_event_logits = (
+            base_global_event_logits + event_calibration_logit
+        ) * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
@@ -1483,6 +1515,9 @@ class AstroMambaH(nn.Module):
             "visit_event_logits": visit_event_logits,
             "frame_event_logits": frame_event_logits,
             "global_event_logits": global_event_logits,
+            "base_global_event_logits": base_global_event_logits,
+            "event_calibration_logit": event_calibration_logit,
+            "event_evidence": event_evidence,
             "pooled_backbone_event_logits": pooled_backbone_event_logits,
             "head_logits": head_logits,
             "missing_modality_flags": missing_modality_flags,
