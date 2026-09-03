@@ -26,7 +26,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
-CACHE_FORMAT_VERSION = 8
+CACHE_FORMAT_VERSION = 9
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -88,8 +88,12 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         source_rate_per_second=0.5,
         background_rate_per_second=1.0,
         pixel_noise_sigma=0.008,
-        field_star_count=5,
-        field_planet_probability=0.30,
+        # Kepler TPFs are compact crowded fields rather than isolated
+        # single-source cutouts. Keep the supervised target at index zero,
+        # but expose several unresolved neighbours whose planet-host status
+        # is sampled independently and is not used as the event label.
+        field_star_count=8,
+        field_planet_probability=0.25,
         field_star_flux_ratio_min=0.03,
         field_star_flux_ratio_max=0.30,
         field_star_min_separation_pixels=1.5,
@@ -513,7 +517,7 @@ def main() -> int:
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
                 "field_planet_probability": generator_config.field_planet_probability,
-                "source_position_policy": "deterministic_noncentral_uniform_0.14_0.86",
+                "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
                 "cache_dir": str(cache_dir),
                 "cache_enabled": True,
                 "pair_count": args.pair_count,
@@ -549,7 +553,7 @@ def main() -> int:
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
             "field_planet_probability": generator_config.field_planet_probability,
-            "source_position_policy": "deterministic_noncentral_uniform_0.14_0.86",
+            "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
             "cache_dir": str(cache_dir),
             "cache_enabled": True,
             "pair_count": args.pair_count,
