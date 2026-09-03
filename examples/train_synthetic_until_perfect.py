@@ -27,7 +27,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 11
+CACHE_FORMAT_VERSION = 13
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -103,7 +103,11 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # Kepler light curves contain percent-level correlated variability;
         # this is deliberately applied to null and injected counterfactuals
         # alike so the event label cannot be inferred from nuisance strength.
-        variability_sigma=0.03,
+        # The real Kepler adapter's aperture residuals are typically a few
+        # uncertainty units, not tens of units. Keep the target-star common
+        # mode near the measured fractional fluctuation scale; the separate
+        # field-star AR(1) process below still supplies crowded-field noise.
+        variability_sigma=0.0015,
         stellar_brightness_noise_sigma=0.003,
         stellar_brightness_ar1=0.85,
         stellar_brightness_amplitude_scatter=0.55,
@@ -139,6 +143,99 @@ def _source_position(generator_config: SyntheticConfig, sample_index: int) -> tu
         for value in np.clip(rng.normal((0.60, 0.49), (0.09, 0.10)), 0.12, 0.88)
     )
     return source_x, source_y
+
+
+def _sample_target_event_config(
+    generator_config: SyntheticConfig,
+    sample_index: int,
+) -> SyntheticConfig:
+    """Vary target-transit morphology while keeping every positive observable.
+
+    A fixed phase, duration, depth, and impact parameter lets a classifier
+    memorize one artificial waveform. The real corpus contains a range of
+    transit shapes, so sample those parameters deterministically per scene.
+    The epoch stays inside the compact 16-cadence window, which preserves the
+    counterfactual label contract instead of creating positive labels with no
+    visible event.
+    """
+
+    rng = np.random.default_rng(generator_config.seed * 7_919 + sample_index * 104_729)
+    window_days = generator_config.local_step_spacing_days * max(
+        generator_config.local_steps - 1,
+        1,
+    )
+    epoch_offset = float(rng.uniform(0.04, max(0.041, window_days - 0.035)))
+    return replace(
+        generator_config,
+        transit_period_days=float(rng.uniform(2.0, 30.0)),
+        transit_epoch_offset_days=epoch_offset,
+        transit_duration_hours=float(rng.uniform(1.5, 6.0)),
+        transit_radius_ratio=float(rng.uniform(0.03, 0.12)),
+        transit_impact_parameter=float(rng.uniform(0.0, 0.85)),
+    )
+
+
+def _match_real_adapter_context(
+    embedded: dict[str, np.ndarray],
+    *,
+    timestamps_mid_bjd_tdb: np.ndarray,
+    detector_height: int,
+    detector_width: int,
+    canvas: int = 32,
+) -> dict[str, np.ndarray]:
+    """Make simulator side channels obey the real Kepler adapter contract."""
+
+    result = dict(embedded)
+    mid = np.asarray(timestamps_mid_bjd_tdb, dtype=np.float64)
+    finite_mid = mid[np.isfinite(mid)]
+    center = float(np.median(finite_mid))
+    cadence_days = (
+        float(np.median(np.diff(mid[0][np.isfinite(mid[0])])))
+        if mid.shape[1] > 1 and np.isfinite(mid[0]).sum() > 1
+        else 0.0204
+    )
+    result["local_time"] = np.stack(
+        (mid - center, mid - center, mid - center,
+         np.full_like(mid, cadence_days), np.ones_like(mid)),
+        axis=-1,
+    ).astype(np.float32)[None, ...]
+    result["long_time"] = np.asarray(
+        [float(finite_mid.min() - center), float(finite_mid.max() - center),
+         float(finite_mid.size), float(finite_mid.max() - finite_mid.min()), 1.0],
+        dtype=np.float32,
+    )[None, None, :]
+    result["geometry"] = np.zeros_like(result["geometry"], dtype=np.float32)
+
+    raster = result["raster"]
+    y0 = (canvas - detector_height) // 2
+    x0 = (canvas - detector_width) // 2
+    compact_valid = raster[0, :, :, 3, y0 : y0 + detector_height, x0 : x0 + detector_width]
+    compact_quality = raster[0, :, :, 4, y0 : y0 + detector_height, x0 : x0 + detector_width]
+    valid_fraction = compact_valid.mean(axis=(-1, -2))
+    quality_fraction = compact_quality.mean(axis=(-1, -2))
+    coverage = np.stack(
+        (np.ones_like(valid_fraction), valid_fraction, quality_fraction,
+         np.full_like(valid_fraction, detector_height / canvas),
+         np.full_like(valid_fraction, detector_width / canvas),
+         np.ones_like(valid_fraction)),
+        axis=-1,
+    )
+    result["coverage_vector"] = coverage[None, ...].astype(np.float32)
+
+    # The real adapter exposes one source token for the selected aperture.
+    # Keep field stars in the raster, but do not feed simulator-only catalog
+    # fields (especially has_exoplanet) into a model trained on real tokens.
+    source_xy = np.asarray(result["object_tokens"][0, :, 0, :2], dtype=np.float32)
+    objects = np.zeros((1, source_xy.shape[0], 1, 12), dtype=np.float32)
+    objects[0, :, 0, :2] = source_xy
+    objects[0, :, 0, 2] = detector_width / canvas
+    objects[0, :, 0, 3] = detector_height / canvas
+    objects[0, :, 0, 10:] = 1.0
+    result["object_tokens"] = objects
+    result["object_mask"] = np.ones((1, source_xy.shape[0], 1), dtype=bool)
+    result["exposure_duration"] = np.full_like(result["exposure_duration"], 1800.0)
+    result["wavelength_tokens"][..., 0] = np.log10(650.0) / 4.0
+    return result
 
 
 def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dict[str, np.ndarray]:
@@ -183,7 +280,7 @@ def _generate_pair(
 
     source_x, source_y = _source_position(generator_config, sample_index)
     bundle_config = replace(
-        generator_config,
+        _sample_target_event_config(generator_config, sample_index),
         seed=generator_config.seed + sample_index,
         source_x=source_x,
         source_y=source_y,
@@ -201,6 +298,14 @@ def _generate_pair(
         # latter to the former at this adapter boundary.
         raster = embedded["raster"]
         wavelength_tokens = embedded["wavelength_tokens"]
+        raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
+        embedded["raster"] = raster
+        embedded = _match_real_adapter_context(
+            embedded,
+            timestamps_mid_bjd_tdb=bundle.timestamps_mid_bjd_tdb,
+            detector_height=generator_config.raster_height,
+            detector_width=generator_config.raster_width,
+        )
         cadence_values = wavelength_tokens[..., 1]
         cadence_uncertainty = wavelength_tokens[..., 3]
         wavelength_tokens[..., 6] = _robust_temporal_score(
@@ -208,8 +313,6 @@ def _generate_pair(
             cadence_uncertainty,
         )
         embedded["wavelength_tokens"] = wavelength_tokens
-        raster[:, :, :, 4] = raster[:, :, :, 3] * (1.0 - raster[:, :, :, 4])
-        embedded["raster"] = raster
         views.append(embedded)
         labels.append(label)
         source_positions.append((source_x, source_y))
