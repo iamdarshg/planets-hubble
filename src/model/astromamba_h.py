@@ -986,6 +986,19 @@ class AstroMambaH(nn.Module):
             (source_photometry_values * wavelength_weights).sum(dim=3)
             / wavelength_weights.sum(dim=3).clamp_min(1.0)
         )
+        # The temporal convolution path has no explicit padding mask. Keep
+        # invalid detector cadences neutral there rather than exposing the
+        # division-by-one zeros as artificial zero-flux transit steps. The
+        # summary/event paths still use ``wavelength_present`` below to omit
+        # these cadences from their reductions entirely.
+        photometry_valid = (wavelength_present & step_mask).unsqueeze(-1)
+        neutral_photometry = torch.zeros_like(source_photometry_values)
+        neutral_photometry[..., 0] = 1.0
+        source_photometry_values = torch.where(
+            photometry_valid,
+            source_photometry_values,
+            neutral_photometry,
+        )
         source_photometry = self.source_photometry_projection(source_photometry_values)
         source_photometry = source_photometry * (wavelength_present & step_mask).unsqueeze(-1).to(
             source_photometry.dtype
