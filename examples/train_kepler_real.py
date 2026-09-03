@@ -296,7 +296,16 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
     result = model.load_state_dict(state_dict, strict=False)
-    allowed_missing = {"core.temporal_summary_event.0.weight", "core.temporal_summary_event.0.bias", "core.temporal_summary_event.2.weight", "core.temporal_summary_event.2.bias"}
+    allowed_missing = {
+        "core.temporal_summary_event.0.weight",
+        "core.temporal_summary_event.0.bias",
+        "core.temporal_summary_event.2.weight",
+        "core.temporal_summary_event.2.bias",
+        "core.temporal_shape_event.0.weight",
+        "core.temporal_shape_event.0.bias",
+        "core.temporal_shape_event.2.weight",
+        "core.temporal_shape_event.2.bias",
+    }
     unexpected_missing = set(result.missing_keys) - allowed_missing
     if unexpected_missing or result.unexpected_keys:
         raise RuntimeError(f"checkpoint mismatch: missing={sorted(unexpected_missing)} unexpected={result.unexpected_keys}")
@@ -318,12 +327,13 @@ def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
 
 
 def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
-    """Train only the compact temporal evidence calibration head."""
+    """Train only the compact temporal evidence calibration heads."""
 
     for parameter in model.parameters():
         parameter.requires_grad = False
-    for parameter in model.core.temporal_summary_event.parameters():
-        parameter.requires_grad = True
+    for module in (model.core.temporal_summary_event, model.core.temporal_shape_event):
+        for parameter in module.parameters():
+            parameter.requires_grad = True
 
 
 def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:

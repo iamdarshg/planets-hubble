@@ -754,6 +754,18 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_summary_event[-1].weight)
         nn.init.zeros_(self.temporal_summary_event[-1].bias)
+        # Keep a separate zero-initialized shape head so older checkpoints
+        # can acquire cadence geometry without changing the existing summary
+        # feature contract.  This head is intentionally fed only observed
+        # photometry-derived features; no ephemeris or label-side metadata is
+        # allowed into the event decision.
+        self.temporal_shape_event = nn.Sequential(
+            nn.Linear(26, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+        )
+        nn.init.zeros_(self.temporal_shape_event[-1].weight)
+        nn.init.zeros_(self.temporal_shape_event[-1].bias)
         self.cross_modal_fusion = nn.ModuleList(
             CrossModalBlock(config) for _ in range(config.fusion_blocks)
         )
@@ -1082,6 +1094,88 @@ class AstroMambaH(nn.Module):
             dim=-1,
         )
         temporal_summary_event_logits = self.temporal_summary_event(temporal_summary).squeeze(-1)
+        cadence_count = summary_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        positions = torch.linspace(-1.0, 1.0, score.shape[-1], device=score.device, dtype=score.dtype)
+        center25 = (positions.abs() <= 0.25).to(score.dtype).reshape(1, 1, -1) * summary_mask
+        center50 = (positions.abs() <= 0.50).to(score.dtype).reshape(1, 1, -1) * summary_mask
+        edge = (positions.abs() >= 0.50).to(score.dtype).reshape(1, 1, -1) * summary_mask
+        left = (positions < 0.0).to(score.dtype).reshape(1, 1, -1) * summary_mask
+        right = (positions >= 0.0).to(score.dtype).reshape(1, 1, -1) * summary_mask
+
+        def masked_mean(values: Tensor, weights: Tensor) -> Tensor:
+            return (values * weights).sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1.0)
+
+        delta_center25 = masked_mean(delta, center25)
+        delta_center50 = masked_mean(delta, center50)
+        delta_edge = masked_mean(delta, edge)
+        delta_left = masked_mean(delta, left)
+        delta_right = masked_mean(delta, right)
+        score_center25 = masked_mean(score, center25)
+        score_center50 = masked_mean(score, center50)
+        score_edge = masked_mean(score, edge)
+        score_left = masked_mean(score, left)
+        score_right = masked_mean(score, right)
+        center25_min = score.masked_fill(center25 == 0, 20.0).amin(dim=(1, 2))
+        edge_min = score.masked_fill(edge == 0, 20.0).amin(dim=(1, 2))
+        center25_delta_min = delta.masked_fill(center25 == 0, 0.0).amin(dim=(1, 2))
+        edge_delta_min = delta.masked_fill(edge == 0, 0.0).amin(dim=(1, 2))
+        center_neg1 = ((score < -1.0).to(score.dtype) * center25).sum(dim=(1, 2)) / cadence_count
+        center_neg2 = ((score < -2.0).to(score.dtype) * center25).sum(dim=(1, 2)) / cadence_count
+        center_neg3 = ((score < -3.0).to(score.dtype) * center25).sum(dim=(1, 2)) / cadence_count
+        edge_neg1 = ((score < -1.0).to(score.dtype) * edge).sum(dim=(1, 2)) / cadence_count
+        center_pos1 = ((score > 1.0).to(score.dtype) * center25).sum(dim=(1, 2)) / cadence_count
+        pair_mask = summary_mask[..., 1:] * summary_mask[..., :-1]
+        pair_neg1 = (
+            (score[..., 1:] < -1.0).to(score.dtype)
+            * (score[..., :-1] < -1.0).to(score.dtype)
+            * pair_mask
+        ).sum(dim=(1, 2)) / cadence_count
+        pair_neg2 = (
+            (score[..., 1:] < -2.0).to(score.dtype)
+            * (score[..., :-1] < -2.0).to(score.dtype)
+            * pair_mask
+        ).sum(dim=(1, 2)) / cadence_count
+        score_diff = (score[..., 1:] - score[..., :-1]).abs()
+        diff_mask = pair_mask
+        diff_mean = (score_diff * diff_mask).sum(dim=(1, 2)) / diff_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        if score.shape[-1] >= 3:
+            second_mask = summary_mask[..., 2:] * summary_mask[..., 1:-1] * summary_mask[..., :-2]
+            second_diff = (score[..., 2:] - 2.0 * score[..., 1:-1] + score[..., :-2]).abs()
+            second_mean = (second_diff * second_mask).sum(dim=(1, 2)) / second_mask.sum(dim=(1, 2)).clamp_min(1.0)
+        else:
+            second_mean = torch.zeros_like(diff_mean)
+        temporal_shape = torch.stack(
+            (
+                (delta_center25 * 100.0).clamp(-20.0, 20.0),
+                (delta_center50 * 100.0).clamp(-20.0, 20.0),
+                (delta_edge * 100.0).clamp(-20.0, 20.0),
+                ((delta_center25 - delta_edge) * 100.0).clamp(-20.0, 20.0),
+                ((delta_center50 - delta_edge) * 100.0).clamp(-20.0, 20.0),
+                ((delta_left - delta_right) * 100.0).clamp(-20.0, 20.0),
+                (score_center25 / 5.0).clamp(-20.0, 20.0),
+                (score_center50 / 5.0).clamp(-20.0, 20.0),
+                (score_edge / 5.0).clamp(-20.0, 20.0),
+                ((score_center25 - score_edge) / 5.0).clamp(-20.0, 20.0),
+                ((score_center50 - score_edge) / 5.0).clamp(-20.0, 20.0),
+                ((score_left - score_right) / 5.0).clamp(-20.0, 20.0),
+                (center25_min / 5.0).clamp(-20.0, 20.0),
+                (edge_min / 5.0).clamp(-20.0, 20.0),
+                ((center25_min - edge_min) / 5.0).clamp(-20.0, 20.0),
+                (center25_delta_min * 100.0).clamp(-20.0, 20.0),
+                (edge_delta_min * 100.0).clamp(-20.0, 20.0),
+                center_neg1.clamp(0.0, 1.0),
+                center_neg2.clamp(0.0, 1.0),
+                center_neg3.clamp(0.0, 1.0),
+                edge_neg1.clamp(0.0, 1.0),
+                center_pos1.clamp(0.0, 1.0),
+                (pair_neg1 / 5.0).clamp(0.0, 1.0),
+                (pair_neg2 / 5.0).clamp(0.0, 1.0),
+                (diff_mean / 5.0).clamp(0.0, 20.0),
+                (second_mean / 5.0).clamp(0.0, 20.0),
+            ),
+            dim=-1,
+        )
+        temporal_shape_event_logits = self.temporal_shape_event(temporal_shape).squeeze(-1)
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
             visit_source_event_logits.dtype
@@ -1093,7 +1187,7 @@ class AstroMambaH(nn.Module):
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
-        ) + temporal_summary_event_logits
+        ) + temporal_summary_event_logits + temporal_shape_event_logits
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
