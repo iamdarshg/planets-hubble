@@ -743,6 +743,10 @@ class AstroMambaH(nn.Module):
             nn.Linear(config.embedding_dim, config.embedding_dim),
         )
         self.source_photometry_event = nn.Linear(2, 1)
+        # Keep confidence calibration explicit and bounded.  A missing value
+        # in pre-calibration checkpoints is treated as the identity scale by
+        # the real-data adapter.
+        self.event_logit_scale = nn.Parameter(torch.tensor(1.0))
         # A compact, explicitly temporal evidence path.  Its final layer is
         # zero-initialized below so checkpoints created before this head was
         # added retain their previous predictions until the new evidence is
@@ -1217,6 +1221,7 @@ class AstroMambaH(nn.Module):
             source_event_logits,
             source_photometry_event_logits,
         ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_sequence_event_logits
+        global_event_logits = global_event_logits * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 

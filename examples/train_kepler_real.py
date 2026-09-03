@@ -297,6 +297,7 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
     result = model.load_state_dict(state_dict, strict=False)
     allowed_missing = {
+        "core.event_logit_scale",
         "core.temporal_summary_event.0.weight",
         "core.temporal_summary_event.0.bias",
         "core.temporal_summary_event.2.weight",
@@ -347,6 +348,7 @@ def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
     ):
         for parameter in module.parameters():
             parameter.requires_grad = True
+    model.core.event_logit_scale.requires_grad = True
 
 
 def _metrics(model, root: Path, records: list[dict[str, object]], device: torch.device, batch_size: int) -> dict[str, object]:
