@@ -65,6 +65,40 @@ def _batch_records(records: list[dict[str, object]], batch_size: int, *, seed: i
         yield [records[int(index)] for index in indices[start : start + batch_size]]
 
 
+def _pair_key(record: dict[str, object]) -> str:
+    stem = Path(str(record["path"])).stem
+    return stem.rsplit("-", 1)[0]
+
+
+def _paired_batch_records(
+    records: list[dict[str, object]], batch_size: int, *, seed: int
+) -> Iterable[list[dict[str, object]]]:
+    """Batch positive/control counterfactual windows from the same target."""
+
+    if batch_size < 2:
+        raise ValueError("paired ranking requires batch-size >= 2")
+    grouped: dict[str, dict[int, dict[str, object]]] = {}
+    for record in records:
+        grouped.setdefault(_pair_key(record), {})[int(record["label"])] = record
+    pairs = [
+        (items[1], items[0])
+        for items in grouped.values()
+        if 0 in items and 1 in items
+    ]
+    if not pairs:
+        raise ValueError("paired ranking found no complete positive/control pairs")
+    rng = np.random.default_rng(seed)
+    order = np.arange(len(pairs))
+    rng.shuffle(order)
+    pairs_per_batch = max(1, batch_size // 2)
+    for start in range(0, len(order), pairs_per_batch):
+        batch: list[dict[str, object]] = []
+        for index in order[start : start + pairs_per_batch]:
+            positive, control = pairs[int(index)]
+            batch.extend((positive, control))
+        yield batch
+
+
 def _normalize_frame_arrays(
     science: np.ndarray,
     uncertainty: np.ndarray,
@@ -527,6 +561,12 @@ def main() -> int:
     parser.add_argument("--label-smoothing", type=float, default=0.0)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument(
+        "--paired-ranking-weight",
+        type=float,
+        default=0.0,
+        help="add a positive-vs-control same-target ranking loss; zero disables it",
+    )
+    parser.add_argument(
         "--synthetic-rehearsal-pairs",
         type=int,
         default=0,
@@ -565,6 +605,8 @@ def main() -> int:
         raise ValueError("rss-cap-bytes must be positive")
     if args.synthetic_rehearsal_pairs < 0 or args.synthetic_rehearsal_weight < 0.0:
         raise ValueError("synthetic rehearsal pairs and weight cannot be negative")
+    if args.paired_ranking_weight < 0.0:
+        raise ValueError("paired-ranking-weight cannot be negative")
     if args.train_only_temporal_summary and args.train_only_event_calibration:
         raise ValueError("train-only-temporal-summary and train-only-event-calibration are mutually exclusive")
     if not 0.0 <= args.label_smoothing < 1.0:
@@ -602,7 +644,11 @@ def main() -> int:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    train_steps_per_epoch = (len(training_records) + args.batch_size - 1) // args.batch_size
+    if args.paired_ranking_weight:
+        pair_count = len({_pair_key(record) for record in training_records})
+        train_steps_per_epoch = (pair_count + max(args.batch_size // 2, 1) - 1) // max(args.batch_size // 2, 1)
+    else:
+        train_steps_per_epoch = (len(training_records) + args.batch_size - 1) // args.batch_size
     total_steps = max(train_steps_per_epoch * args.epochs, 1)
     schedulers = (
         [torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps) for optimizer in optimizers]
@@ -637,7 +683,12 @@ def main() -> int:
         losses: list[float] = []
         real_losses: list[float] = []
         rehearsal_losses: list[float] = []
-        for batch_records in _batch_records(training_records, args.batch_size, seed=args.seed + epoch, shuffle=True):
+        batch_iterator = (
+            _paired_batch_records(training_records, args.batch_size, seed=args.seed + epoch)
+            if args.paired_ranking_weight
+            else _batch_records(training_records, args.batch_size, seed=args.seed + epoch, shuffle=True)
+        )
+        for batch_records in batch_iterator:
             batch = _make_batch(root, batch_records, device)
             for optimizer in optimizers:
                 optimizer.zero_grad(set_to_none=True)
@@ -645,6 +696,13 @@ def main() -> int:
                 output = model(batch)
                 real_loss = loss_fn(output, batch, args.label_smoothing)
                 loss = real_loss
+                ranking_loss = None
+                if args.paired_ranking_weight:
+                    logits = output["global_event_logits"].reshape(-1)
+                    positive_logits = logits[0::2]
+                    control_logits = logits[1::2]
+                    ranking_loss = F.relu(0.25 - positive_logits + control_logits).mean()
+                    loss = loss + args.paired_ranking_weight * ranking_loss
                 rehearsal_loss = None
                 if args.synthetic_rehearsal_pairs:
                     if synthetic_batch_cache_path is None or synthetic_make_batch is None or synthetic_config is None:
@@ -683,6 +741,8 @@ def main() -> int:
                     f"RSS cap exceeded at step {global_step}: {peak_rss} > {args.rss_cap_bytes}"
                 )
             del batch, output, loss, real_loss
+            if ranking_loss is not None:
+                del ranking_loss
             if args.synthetic_rehearsal_pairs:
                 del rehearsal_batch, rehearsal_output, rehearsal_loss
             if global_step % 10 == 0:
@@ -751,6 +811,7 @@ def main() -> int:
             "synthetic_rehearsal_weight": args.synthetic_rehearsal_weight,
             "synthetic_rehearsal_start_index": args.synthetic_rehearsal_start_index,
             "weight_decay": args.weight_decay,
+            "paired_ranking_weight": args.paired_ranking_weight,
             "best_epoch": best_epoch,
             "best_validation_bce": best_validation_bce,
             "best_validation_accuracy": best_validation_accuracy,
@@ -785,6 +846,7 @@ def main() -> int:
         "synthetic_rehearsal_weight": args.synthetic_rehearsal_weight,
         "synthetic_rehearsal_start_index": args.synthetic_rehearsal_start_index,
         "weight_decay": args.weight_decay,
+        "paired_ranking_weight": args.paired_ranking_weight,
         "global_steps": global_step,
         "dataset_counts": {name: len(value) for name, value in splits.items()},
         "training_sample_count": len(training_records),
