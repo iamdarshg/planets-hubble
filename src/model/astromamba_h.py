@@ -815,6 +815,27 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_sequence_projection[-1].weight)
         nn.init.zeros_(self.temporal_sequence_projection[-1].bias)
+        # A multi-scale detector keeps short ingress/flat-bottom/egress
+        # signatures visible even when the event is not centered in the
+        # window. The existing sequence path is average-pooled; this path
+        # uses progressively wider receptive fields followed by max pooling
+        # so a localized transit is not diluted by quiet cadences.
+        self.temporal_multiscale_event = nn.Sequential(
+            nn.Conv1d(2, 32, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(32, 32, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.Conv1d(32, 32, kernel_size=9, padding=4),
+            nn.GELU(),
+            nn.AdaptiveMaxPool1d(1),
+        )
+        self.temporal_multiscale_projection = nn.Sequential(
+            nn.Linear(32, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.temporal_multiscale_projection[-1].weight)
+        nn.init.zeros_(self.temporal_multiscale_projection[-1].bias)
         # The evidence paths above are intentionally additive so each one can
         # be supervised independently.  Their raw sum is not, however, a
         # calibrated probability: a few correlated paths can amplify one
@@ -907,6 +928,9 @@ class AstroMambaH(nn.Module):
                 [self.source_photometry_projection, self.source_photometry_event]
             ),
             "event_evidence_calibration": self.event_evidence_calibration,
+            "temporal_multiscale_event": nn.ModuleList(
+                [self.temporal_multiscale_event, self.temporal_multiscale_projection]
+            ),
             "object_context_encoder": self.object_context_encoder,
             "geometry_coverage_encoder": self.geometry_coverage_encoder,
             "cross_modal_fusion": self.cross_modal_fusion,
@@ -1340,6 +1364,15 @@ class AstroMambaH(nn.Module):
         sequence_visit_logits = self.temporal_sequence_projection(sequence_features).reshape(batch, visits)
         sequence_visit_logits = sequence_visit_logits.masked_fill(~visit_mask, torch.finfo(sequence_visit_logits.dtype).min)
         temporal_sequence_event_logits = sequence_visit_logits.max(dim=1).values
+        multiscale_encoded = self.temporal_multiscale_event(sequence)
+        multiscale_features = multiscale_encoded.squeeze(-1)
+        multiscale_visit_logits = self.temporal_multiscale_projection(
+            multiscale_features
+        ).reshape(batch, visits)
+        multiscale_visit_logits = multiscale_visit_logits.masked_fill(
+            ~visit_mask, torch.finfo(multiscale_visit_logits.dtype).min
+        )
+        temporal_multiscale_event_logits = multiscale_visit_logits.max(dim=1).values
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
             visit_source_event_logits.dtype
@@ -1371,7 +1404,9 @@ class AstroMambaH(nn.Module):
         )
         event_calibration_logit = self.event_evidence_calibration(event_evidence).squeeze(-1)
         global_event_logits = (
-            base_global_event_logits + event_calibration_logit
+            base_global_event_logits
+            + temporal_multiscale_event_logits
+            + event_calibration_logit
         ) * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
@@ -1518,6 +1553,7 @@ class AstroMambaH(nn.Module):
             "base_global_event_logits": base_global_event_logits,
             "event_calibration_logit": event_calibration_logit,
             "event_evidence": event_evidence,
+            "temporal_multiscale_event_logits": temporal_multiscale_event_logits,
             "pooled_backbone_event_logits": pooled_backbone_event_logits,
             "head_logits": head_logits,
             "missing_modality_flags": missing_modality_flags,
