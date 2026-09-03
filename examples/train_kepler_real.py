@@ -506,6 +506,11 @@ def main() -> int:
         action="store_true",
         help="freeze the representation and train only the compact temporal evidence calibration head",
     )
+    parser.add_argument(
+        "--include-validation-in-training",
+        action="store_true",
+        help="fit on train and validation records together after model selection; the test split remains untouched",
+    )
     args = parser.parse_args()
     if args.batch_size < 1 or args.eval_batch_size < 1 or args.epochs < 1 or args.learning_rate <= 0.0 or args.weight_decay < 0.0:
         raise ValueError("batch sizes, epochs, and learning-rate must be positive; weight-decay cannot be negative")
@@ -534,6 +539,7 @@ def main() -> int:
         raise ValueError(f"manifest split is empty: { {name: len(value) for name, value in splits.items()} }")
     if not args.input_checkpoint.is_file():
         raise FileNotFoundError(args.input_checkpoint)
+    training_records = splits["train"] + splits["validation"] if args.include_validation_in_training else splits["train"]
     model = _load_model(args.input_checkpoint, device)
     if args.reset_source_photometry_branch:
         _reset_source_photometry_branch(model)
@@ -545,7 +551,7 @@ def main() -> int:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
     )
-    train_steps_per_epoch = (len(splits["train"]) + args.batch_size - 1) // args.batch_size
+    train_steps_per_epoch = (len(training_records) + args.batch_size - 1) // args.batch_size
     total_steps = max(train_steps_per_epoch * args.epochs, 1)
     schedulers = (
         [torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps) for optimizer in optimizers]
@@ -580,7 +586,7 @@ def main() -> int:
         losses: list[float] = []
         real_losses: list[float] = []
         rehearsal_losses: list[float] = []
-        for batch_records in _batch_records(splits["train"], args.batch_size, seed=args.seed + epoch, shuffle=True):
+        for batch_records in _batch_records(training_records, args.batch_size, seed=args.seed + epoch, shuffle=True):
             batch = _make_batch(root, batch_records, device)
             for optimizer in optimizers:
                 optimizer.zero_grad(set_to_none=True)
@@ -631,7 +637,7 @@ def main() -> int:
             if global_step % 10 == 0:
                 print(json.dumps({"epoch": epoch, "step": global_step, "loss": losses[-1], "rss_bytes": peak_rss}), flush=True)
         with torch.inference_mode():
-            train_metrics = _metrics(model, root, splits["train"], device, eval_batch_size)
+            train_metrics = _metrics(model, root, training_records, device, eval_batch_size)
             peak_rss = max(peak_rss, _rss_bytes())
             if peak_rss > args.rss_cap_bytes:
                 raise MemoryError(
@@ -700,6 +706,7 @@ def main() -> int:
             "selection_metric": "validation_mean_bce_loss",
             "reset_source_photometry_branch": args.reset_source_photometry_branch,
             "train_only_temporal_summary": args.train_only_temporal_summary,
+            "include_validation_in_training": args.include_validation_in_training,
         },
         temporary,
     )
@@ -726,6 +733,8 @@ def main() -> int:
         "weight_decay": args.weight_decay,
         "global_steps": global_step,
         "dataset_counts": {name: len(value) for name, value in splits.items()},
+        "training_sample_count": len(training_records),
+        "include_validation_in_training": args.include_validation_in_training,
         "unique_hosts": {name: len({int(record["kepid"]) for record in value}) for name, value in splits.items()},
         "history": history,
         "best_epoch": best_epoch,
