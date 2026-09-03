@@ -25,8 +25,8 @@ from training.adapters import AstroMambaHInputs, AstroMambaHTrainingAdapter, Ast
 from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E402
 
 
-RSS_CAP_BYTES = 1_503_238_553  # 1.4 GiB
-CACHE_FORMAT_VERSION = 9
+RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
+CACHE_FORMAT_VERSION = 10
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -83,11 +83,13 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         wavelength_bandwidth_nm=80.0,
         exposure_seconds=1765.0,
         source_contrast=8.0,
-        # Lower photon rate raises the normalized uncertainty into the range
-        # observed in the real adapter (roughly 0.005--0.025).
-        source_rate_per_second=0.5,
-        background_rate_per_second=1.0,
-        pixel_noise_sigma=0.008,
+        # Use count-domain rates that produce the small per-pixel uncertainty
+        # of real Kepler apertures after normalization.  The previous
+        # low-count settings made uncertainty itself a synthetic-only label
+        # shortcut.
+        source_rate_per_second=5000.0,
+        background_rate_per_second=1000.0,
+        pixel_noise_sigma=0.0002,
         # Kepler TPFs are compact crowded fields rather than isolated
         # single-source cutouts. Keep the supervised target at index zero,
         # but expose several unresolved neighbours whose planet-host status
@@ -97,6 +99,10 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         field_star_flux_ratio_min=0.03,
         field_star_flux_ratio_max=0.30,
         field_star_min_separation_pixels=1.5,
+        # Kepler light curves contain percent-level correlated variability;
+        # this is deliberately applied to null and injected counterfactuals
+        # alike so the event label cannot be inferred from nuisance strength.
+        variability_sigma=0.03,
         stellar_brightness_noise_sigma=0.003,
         stellar_brightness_ar1=0.85,
         stellar_brightness_amplitude_scatter=0.55,

@@ -513,34 +513,42 @@ class SyntheticGenerator:
             + spatial
             + geometric[..., None, None]
         )
-        # Match the real TPF adapter's count-domain normalization.  The
-        # synthetic scene is dimensionless, so one scene unit is the
-        # equivalent of the adapter's minimum one-count scale.  Dividing by
-        # the tiny Poisson uncertainty here makes a 1% transit look like a
-        # many-sigma impulse and creates a domain-only shortcut.
+        # Match the real TPF adapter's global normalization contract.  The
+        # real path estimates one baseline and one robust scale over the
+        # whole detector sequence; it does not normalize every pixel to its
+        # local scene model.  Using the same global statistics prevents the
+        # raster residual channel from becoming a synthetic-only shortcut.
+        finite_positive = np.isfinite(physical) & (physical > 0.0)
+        positive_values = physical[finite_positive]
+        global_baseline = float(np.median(positive_values)) if positive_values.size else 1.0
+        if positive_values.size:
+            # Reuse the boolean-indexed temporary for the robust scale rather
+            # than keeping both a full detector residual and its absolute
+            # copy alive during generation.
+            np.subtract(positive_values, global_baseline, out=positive_values)
+            np.abs(positive_values, out=positive_values)
+            robust_scale = float(np.median(positive_values)) * 1.4826
+        else:
+            robust_scale = 0.0
+        uncertainty_scale = float(np.median(np.abs(scalar_uncertainty)))
+        global_scale = max(robust_scale, uncertainty_scale, 1.0)
         # Reuse the existing baseline buffer.  This matters for the bounded
         # NumPy generator: materializing both a geometric baseline and a
-        # second normalization map needlessly raises peak Python-traced
-        # allocation for larger compact test scenes.
+        # second normalization map needlessly raises peak allocation for
+        # larger compact test scenes.
         baseline *= 1.0 + geometric[..., None, None]
         np.maximum(np.abs(baseline), 1.0, out=baseline)
-        # Channel 0 is the real adapter's global-baseline image view: retain
-        # the resolved/unresolved field-star structure relative to the unit
-        # background. Channel 1 below is the separate local-baseline event
-        # residual used for transit evidence.
         normalized_physical = np.clip(
-            physical - 1.0,
+            physical / max(abs(global_baseline), 1.0) - 1.0,
             -20.0,
             20.0,
         )
-        residual = np.clip(
-            (physical - baseline) / baseline,
-            -20.0,
-            20.0,
-        )
+        np.subtract(physical, global_baseline, out=physical)
+        np.divide(physical, global_scale, out=physical)
+        residual = np.clip(physical, -20.0, 20.0)
         uncertainty_map = np.broadcast_to(
             np.clip(
-                (scalar_uncertainty[..., None, None] + 0.0002) / baseline,
+                (scalar_uncertainty[..., None, None] + 0.0002) / global_scale,
                 0.0,
                 20.0,
             ),
