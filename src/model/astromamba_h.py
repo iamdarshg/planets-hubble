@@ -836,6 +836,18 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_multiscale_projection[-1].weight)
         nn.init.zeros_(self.temporal_multiscale_projection[-1].bias)
+        # Let the detector learn interactions among the complementary
+        # hand-crafted temporal views. Separate additive heads cannot express
+        # rules such as "a short dip is useful only when its sidebands are
+        # quiet". The zero output keeps older checkpoints behaviorally
+        # unchanged until this target-domain head is trained.
+        self.temporal_feature_fusion_event = nn.Sequential(
+            nn.Linear(80, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+        )
+        nn.init.zeros_(self.temporal_feature_fusion_event[-1].weight)
+        nn.init.zeros_(self.temporal_feature_fusion_event[-1].bias)
         # The evidence paths above are intentionally additive so each one can
         # be supervised independently.  Their raw sum is not, however, a
         # calibrated probability: a few correlated paths can amplify one
@@ -931,6 +943,7 @@ class AstroMambaH(nn.Module):
             "temporal_multiscale_event": nn.ModuleList(
                 [self.temporal_multiscale_event, self.temporal_multiscale_projection]
             ),
+            "temporal_feature_fusion_event": self.temporal_feature_fusion_event,
             "object_context_encoder": self.object_context_encoder,
             "geometry_coverage_encoder": self.geometry_coverage_encoder,
             "cross_modal_fusion": self.cross_modal_fusion,
@@ -1353,6 +1366,13 @@ class AstroMambaH(nn.Module):
             ))
         temporal_matched = torch.stack(matched_features, dim=-1).clamp(-20.0, 20.0)
         temporal_matched_event_logits = self.temporal_matched_event(temporal_matched).squeeze(-1)
+        temporal_feature_fusion = torch.cat(
+            (temporal_summary, temporal_shape, temporal_robust, temporal_matched),
+            dim=-1,
+        )
+        temporal_feature_fusion_event_logits = self.temporal_feature_fusion_event(
+            temporal_feature_fusion
+        ).squeeze(-1)
         sequence = source_photometry_values.reshape(batch * visits, score.shape[-1], 2).transpose(1, 2)
         sequence_features = self.temporal_sequence_event(sequence).squeeze(-1)
         sequence_max = sequence_features.new_zeros(sequence_features.shape)
@@ -1387,7 +1407,7 @@ class AstroMambaH(nn.Module):
             source_weight=self.event_source_weight.clamp(0.0, 2.0),
             backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
             photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
-        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits
+        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits + temporal_feature_fusion_event_logits
         event_evidence = torch.stack(
             (
                 pooled_backbone_event_logits,
@@ -1554,6 +1574,7 @@ class AstroMambaH(nn.Module):
             "event_calibration_logit": event_calibration_logit,
             "event_evidence": event_evidence,
             "temporal_multiscale_event_logits": temporal_multiscale_event_logits,
+            "temporal_feature_fusion_event_logits": temporal_feature_fusion_event_logits,
             "pooled_backbone_event_logits": pooled_backbone_event_logits,
             "head_logits": head_logits,
             "missing_modality_flags": missing_modality_flags,
