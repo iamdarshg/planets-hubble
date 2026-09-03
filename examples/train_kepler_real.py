@@ -305,6 +305,14 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
         "core.temporal_shape_event.0.bias",
         "core.temporal_shape_event.2.weight",
         "core.temporal_shape_event.2.bias",
+        "core.temporal_sequence_event.0.weight",
+        "core.temporal_sequence_event.0.bias",
+        "core.temporal_sequence_event.2.weight",
+        "core.temporal_sequence_event.2.bias",
+        "core.temporal_sequence_projection.0.weight",
+        "core.temporal_sequence_projection.0.bias",
+        "core.temporal_sequence_projection.2.weight",
+        "core.temporal_sequence_projection.2.bias",
     }
     unexpected_missing = set(result.missing_keys) - allowed_missing
     if unexpected_missing or result.unexpected_keys:
@@ -331,7 +339,12 @@ def _freeze_except_temporal_summary(model: AstroMambaHTrainingAdapter) -> None:
 
     for parameter in model.parameters():
         parameter.requires_grad = False
-    for module in (model.core.temporal_summary_event, model.core.temporal_shape_event):
+    for module in (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_sequence_event,
+        model.core.temporal_sequence_projection,
+    ):
         for parameter in module.parameters():
             parameter.requires_grad = True
 

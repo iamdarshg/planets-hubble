@@ -766,6 +766,24 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_shape_event[-1].weight)
         nn.init.zeros_(self.temporal_shape_event[-1].bias)
+        # A small sequence-local detector complements the hand-built summary
+        # statistics with learned ingress/egress and localized-dip patterns.
+        # Its final projection is zero-initialized for checkpoint compatibility
+        # and to keep this new path opt-in through target-domain training.
+        self.temporal_sequence_event = nn.Sequential(
+            nn.Conv1d(2, 32, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(32, 32, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.temporal_sequence_projection = nn.Sequential(
+            nn.Linear(64, 32),
+            nn.GELU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.zeros_(self.temporal_sequence_projection[-1].weight)
+        nn.init.zeros_(self.temporal_sequence_projection[-1].bias)
         self.cross_modal_fusion = nn.ModuleList(
             CrossModalBlock(config) for _ in range(config.fusion_blocks)
         )
@@ -1176,6 +1194,17 @@ class AstroMambaH(nn.Module):
             dim=-1,
         )
         temporal_shape_event_logits = self.temporal_shape_event(temporal_shape).squeeze(-1)
+        sequence = source_photometry_values.reshape(batch * visits, score.shape[-1], 2).transpose(1, 2)
+        sequence_features = self.temporal_sequence_event(sequence).squeeze(-1)
+        sequence_max = sequence_features.new_zeros(sequence_features.shape)
+        # The average-pooled path captures broad shape; a max over the same
+        # learned feature maps preserves a short, localized transit signature.
+        sequence_encoded = self.temporal_sequence_event[:-1](sequence)
+        sequence_max = torch.amax(sequence_encoded, dim=-1)
+        sequence_features = torch.cat((sequence_features, sequence_max), dim=-1)
+        sequence_visit_logits = self.temporal_sequence_projection(sequence_features).reshape(batch, visits)
+        sequence_visit_logits = sequence_visit_logits.masked_fill(~visit_mask, torch.finfo(sequence_visit_logits.dtype).min)
+        temporal_sequence_event_logits = sequence_visit_logits.max(dim=1).values
         visit_source_event_logits = self.prediction_heads["visit_event"](visit_source_tokens).squeeze(-1)
         visit_source_event_logits = visit_source_event_logits * visit_mask[:, :, None].to(
             visit_source_event_logits.dtype
@@ -1187,7 +1216,7 @@ class AstroMambaH(nn.Module):
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
-        ) + temporal_summary_event_logits + temporal_shape_event_logits
+        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_sequence_event_logits
         frame_event_logits = source_frame_event_logits.mean(dim=3)
         frame_event_probability = frame_event_logits.sigmoid()
 
