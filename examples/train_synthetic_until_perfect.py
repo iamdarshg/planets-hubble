@@ -27,7 +27,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 16
+CACHE_FORMAT_VERSION = 17
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -273,7 +273,35 @@ def _match_real_adapter_context(
     return result
 
 
-def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dict[str, np.ndarray]:
+def _compact_canvas_offset(
+    sample_index: int,
+    *,
+    height: int,
+    width: int,
+    canvas: int = 32,
+) -> tuple[int, int]:
+    """Choose a deterministic non-centered compact-detector canvas offset."""
+
+    available_y = canvas - height + 1
+    available_x = canvas - width + 1
+    rng = np.random.default_rng(97_531 + sample_index * 2_654_435_761)
+    y0 = int(rng.integers(0, available_y))
+    x0 = int(rng.integers(0, available_x))
+    centered_y = (canvas - height) // 2
+    centered_x = (canvas - width) // 2
+    if available_y > 1 and y0 == centered_y:
+        y0 = (y0 + 1) % available_y
+    if available_x > 1 and x0 == centered_x:
+        x0 = (x0 + 1) % available_x
+    return y0, x0
+
+
+def _embed_compact_view(
+    view: dict[str, np.ndarray],
+    *,
+    sample_index: int,
+    canvas: int = 32,
+) -> dict[str, np.ndarray]:
     """Place a compact detector cutout on the model's fixed-size canvas."""
 
     raster = view["raster"]
@@ -284,8 +312,12 @@ def _embed_compact_view(view: dict[str, np.ndarray], *, canvas: int = 32) -> dic
         raise ValueError(f"compact detector {height}x{width} does not fit {canvas}x{canvas}")
     if (height, width) == (canvas, canvas):
         return view
-    y0 = (canvas - height) // 2
-    x0 = (canvas - width) // 2
+    y0, x0 = _compact_canvas_offset(
+        sample_index,
+        height=height,
+        width=width,
+        canvas=canvas,
+    )
     embedded = dict(view)
     raster_canvas = np.zeros((1, visits, steps, channels, canvas, canvas), dtype=np.float32)
     raster_canvas[:, :, :, :, y0 : y0 + height, x0 : x0 + width] = raster
@@ -334,7 +366,8 @@ def _generate_pair(
     source_positions: list[tuple[float, float]] = []
     for view, label in ((bundle.null, 0.0), (bundle.injected, 1.0)):
         embedded = _embed_compact_view(
-            bundle.as_model_numpy("null" if label == 0.0 else "injected")
+            bundle.as_model_numpy("null" if label == 0.0 else "injected"),
+            sample_index=sample_index,
         )
         # The real Kepler adapter exposes channel 4 as a good-quality mask,
         # whereas the generator stores an interpolation mask. Convert the
@@ -971,7 +1004,7 @@ def main() -> int:
                 "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
                 "transit_radius_ratio_min": args.transit_radius_ratio_min,
                 "transit_radius_ratio_max": args.transit_radius_ratio_max,
-                "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
+                "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
                 "cache_dir": str(cache_dir),
                 "cache_enabled": True,
                 "pair_count": args.pair_count,
@@ -1017,7 +1050,7 @@ def main() -> int:
             "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
             "transit_radius_ratio_min": args.transit_radius_ratio_min,
             "transit_radius_ratio_max": args.transit_radius_ratio_max,
-            "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
+            "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
             "cache_dir": str(cache_dir),
             "cache_enabled": True,
             "pair_count": args.pair_count,
@@ -1056,7 +1089,7 @@ def main() -> int:
         "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
         "transit_radius_ratio_min": args.transit_radius_ratio_min,
         "transit_radius_ratio_max": args.transit_radius_ratio_max,
-        "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
+        "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
         "cache_dir": str(cache_dir),
         "cache_enabled": True,
         "sample_index_first": args.start_index,
