@@ -981,6 +981,15 @@ def main() -> int:
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
                 loss = loss_fn(output, batch)
+                if args.loss_mode == "source" and (
+                    args.positive_loss_weight != 1.0 or args.negative_loss_weight != 1.0
+                ):
+                    loss = loss + _weighted_event_loss(
+                        output,
+                        batch,
+                        positive_weight=args.positive_loss_weight,
+                        negative_weight=args.negative_loss_weight,
+                    ) - event_only_loss_fn(output, batch)
                 if args.paired_ranking_weight > 0.0:
                     loss = loss + args.paired_ranking_weight * _paired_ranking_loss(
                         output,
