@@ -126,6 +126,18 @@ def main() -> int:
     parser.add_argument("--rss-cap-bytes", type=int, default=1_200_000_000)
     parser.add_argument("--synthetic-error-gate", type=int, default=3)
     parser.add_argument("--real-loss-gate", type=float, default=0.20)
+    parser.add_argument(
+        "--loss-mode",
+        choices=("event", "source"),
+        default="source",
+        help="Synthetic trainer objective; source mode adds direct source-event supervision.",
+    )
+    parser.add_argument(
+        "--auxiliary-event-head-weight",
+        type=float,
+        default=0.25,
+        help="BCE weight for directly supervising compact event evidence heads.",
+    )
     parser.add_argument("--real-batch-size", type=int, default=8)
     parser.add_argument("--aperture-fraction", type=float, default=0.125)
     parser.add_argument("--start-index", type=int, default=5_000_000)
@@ -147,6 +159,8 @@ def main() -> int:
         raise ValueError("synthetic-error-gate must be non-negative")
     if args.real_loss_gate <= 0.0:
         raise ValueError("real-loss-gate must be positive")
+    if args.auxiliary_event_head_weight < 0.0:
+        raise ValueError("auxiliary-event-head-weight must be non-negative")
     if not args.from_scratch and (args.input_checkpoint is None or not args.input_checkpoint.is_file()):
         raise FileNotFoundError(args.input_checkpoint)
     if args.from_scratch and args.input_checkpoint is not None:
@@ -194,7 +208,7 @@ def main() -> int:
                 "--learning-rate",
                 str(stage.learning_rate),
                 "--loss-mode",
-                "event",
+                args.loss_mode,
                 "--positive-loss-weight",
                 "1.0",
                 "--negative-loss-weight",
@@ -203,6 +217,8 @@ def main() -> int:
                 str(stage.paired_ranking_weight),
                 "--paired-ranking-margin",
                 "0.5",
+                "--auxiliary-event-head-weight",
+                str(args.auxiliary_event_head_weight),
                 "--field-star-count",
                 str(stage.field_star_count),
                 "--field-planet-probability",
@@ -259,6 +275,8 @@ def main() -> int:
                 "synthetic_holdout": report.get("holdout"),
                 "synthetic_training": report.get("training"),
                 "synthetic_improved": synthetic_improved,
+                "loss_mode": args.loss_mode,
+                "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "best_synthetic_checkpoint": str(best_synthetic_checkpoint) if best_synthetic_checkpoint else None,
                 "best_synthetic_errors": best_synthetic_errors,
                 "rss_cap_bytes": args.rss_cap_bytes,

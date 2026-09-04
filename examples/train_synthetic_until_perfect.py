@@ -588,6 +588,43 @@ def _paired_ranking_loss(
     return torch.nn.functional.softplus(margin - (positive_logits - null_logits)).mean()
 
 
+def _auxiliary_event_head_loss(
+    prediction: dict[str, torch.Tensor],
+    batch: AstroMambaHTrainingBatch,
+) -> torch.Tensor:
+    """Directly supervise compact event evidence heads used by the global logit."""
+
+    target = batch.target.to(dtype=torch.float32)
+    terms: list[torch.Tensor] = []
+    for name in (
+        "source_photometry_event_logits",
+        "source_dip_event_logits",
+        "temporal_multiscale_event_logits",
+        "temporal_feature_fusion_event_logits",
+        "pooled_backbone_event_logits",
+    ):
+        logits = prediction.get(name)
+        if isinstance(logits, torch.Tensor) and logits.shape == target.reshape_as(logits).shape:
+            terms.append(
+                torch.nn.functional.binary_cross_entropy_with_logits(
+                    logits,
+                    target.reshape_as(logits),
+                )
+            )
+    source_event_logits = prediction.get("source_event_logits")
+    if isinstance(source_event_logits, torch.Tensor) and source_event_logits.ndim == 2:
+        direct_source_logits = source_event_logits[:, :1]
+        terms.append(
+            torch.nn.functional.binary_cross_entropy_with_logits(
+                direct_source_logits,
+                target.reshape_as(direct_source_logits),
+            )
+        )
+    if not terms:
+        return target.new_zeros(())
+    return torch.stack(terms).mean()
+
+
 def _new_model(device: torch.device) -> AstroMambaHTrainingAdapter:
     """Create FP32 master weights for a clean post-contract curriculum."""
 
@@ -796,6 +833,12 @@ def main() -> int:
         help="minimum desired injected-minus-null logit margin for paired synthetic ranking",
     )
     parser.add_argument(
+        "--auxiliary-event-head-weight",
+        type=float,
+        default=0.0,
+        help="optional BCE weight for directly supervising compact event evidence heads",
+    )
+    parser.add_argument(
         "--field-star-count",
         type=int,
         help="override the number of background/neighbor stars in each synthetic cutout",
@@ -847,6 +890,8 @@ def main() -> int:
         raise ValueError("paired-ranking-weight must be non-negative")
     if args.paired_ranking_margin < 0.0:
         raise ValueError("paired-ranking-margin must be non-negative")
+    if args.auxiliary_event_head_weight < 0.0:
+        raise ValueError("auxiliary-event-head-weight must be non-negative")
     if args.field_star_count is not None and args.field_star_count < 0:
         raise ValueError("field-star-count must be non-negative")
     if args.field_planet_probability is not None and not 0.0 <= args.field_planet_probability <= 1.0:
@@ -942,6 +987,11 @@ def main() -> int:
                         batch,
                         margin=args.paired_ranking_margin,
                     )
+                if args.auxiliary_event_head_weight > 0.0:
+                    loss = loss + args.auxiliary_event_head_weight * _auxiliary_event_head_loss(
+                        output,
+                        batch,
+                    )
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite synthetic loss at step {global_step}")
             loss.backward()
@@ -1004,6 +1054,7 @@ def main() -> int:
                 "negative_loss_weight": args.negative_loss_weight,
                 "paired_ranking_weight": args.paired_ranking_weight,
                 "paired_ranking_margin": args.paired_ranking_margin,
+                "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
@@ -1068,6 +1119,7 @@ def main() -> int:
         "negative_loss_weight": args.negative_loss_weight,
         "paired_ranking_weight": args.paired_ranking_weight,
         "paired_ranking_margin": args.paired_ranking_margin,
+        "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
