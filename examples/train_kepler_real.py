@@ -574,7 +574,14 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     model = AstroMambaHTrainingAdapter(_model_config()).to(device, dtype=torch.float32)
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state_dict = state["model"] if isinstance(state, dict) and "model" in state else state
-    result = model.load_state_dict(state_dict, strict=False)
+    model_state = model.state_dict()
+    compatible = {
+        name: value
+        for name, value in state_dict.items()
+        if name in model_state and tuple(value.shape) == tuple(model_state[name].shape)
+    }
+    skipped_incompatible = set(state_dict) - set(compatible)
+    result = model.load_state_dict(compatible, strict=False)
     allowed_missing = {
         "core.event_logit_scale",
         "core.event_source_weight",
@@ -630,6 +637,13 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     unexpected_missing = set(result.missing_keys) - allowed_missing
     if unexpected_missing or result.unexpected_keys:
         raise RuntimeError(f"checkpoint mismatch: missing={sorted(unexpected_missing)} unexpected={result.unexpected_keys}")
+    model._checkpoint_transfer = {
+        "checkpoint": str(checkpoint),
+        "compatible_tensors": len(compatible),
+        "model_tensors": len(model_state),
+        "missing_after_transfer": len(result.missing_keys),
+        "skipped_incompatible_tensors": len(skipped_incompatible),
+    }
     return model
 
 
