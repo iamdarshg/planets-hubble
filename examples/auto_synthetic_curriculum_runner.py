@@ -146,6 +146,7 @@ def main() -> int:
     parser.add_argument("--reset-temporal-event-heads", action="store_true")
     parser.add_argument("--train-only-event-heads", action="store_true")
     parser.add_argument("--train-only-event-calibration", action="store_true")
+    parser.add_argument("--training-eval-frequency", type=int, default=1)
     args = parser.parse_args()
 
     if args.cycles < 1 or args.stage_count < 1:
@@ -162,6 +163,8 @@ def main() -> int:
         raise ValueError("real-loss-gate must be positive")
     if args.auxiliary_event_head_weight < 0.0:
         raise ValueError("auxiliary-event-head-weight must be non-negative")
+    if args.training_eval_frequency < 1:
+        raise ValueError("training-eval-frequency must be positive")
     if not args.from_scratch and (args.input_checkpoint is None or not args.input_checkpoint.is_file()):
         raise FileNotFoundError(args.input_checkpoint)
     if args.from_scratch and args.input_checkpoint is not None:
@@ -220,6 +223,8 @@ def main() -> int:
                 "0.5",
                 "--auxiliary-event-head-weight",
                 str(args.auxiliary_event_head_weight),
+                "--training-eval-frequency",
+                str(args.training_eval_frequency),
                 "--field-star-count",
                 str(stage.field_star_count),
                 "--field-planet-probability",
@@ -281,6 +286,7 @@ def main() -> int:
                 "loss_mode": args.loss_mode,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "train_only_event_calibration": args.train_only_event_calibration,
+                "training_eval_frequency": args.training_eval_frequency,
                 "best_synthetic_checkpoint": str(best_synthetic_checkpoint) if best_synthetic_checkpoint else None,
                 "best_synthetic_errors": best_synthetic_errors,
                 "rss_cap_bytes": args.rss_cap_bytes,

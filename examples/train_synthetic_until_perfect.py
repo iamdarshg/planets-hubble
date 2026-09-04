@@ -889,6 +889,15 @@ def main() -> int:
         help="optional BCE weight for directly supervising compact event evidence heads",
     )
     parser.add_argument(
+        "--training-eval-frequency",
+        type=int,
+        default=1,
+        help=(
+            "score the full synthetic training set every N epochs; new-best, final, "
+            "and early-stop epochs are still scored"
+        ),
+    )
+    parser.add_argument(
         "--field-star-count",
         type=int,
         help="override the number of background/neighbor stars in each synthetic cutout",
@@ -942,6 +951,8 @@ def main() -> int:
         raise ValueError("paired-ranking-margin must be non-negative")
     if args.auxiliary_event_head_weight < 0.0:
         raise ValueError("auxiliary-event-head-weight must be non-negative")
+    if args.training_eval_frequency < 1:
+        raise ValueError("training-eval-frequency must be positive")
     if args.field_star_count is not None and args.field_star_count < 0:
         raise ValueError("field-star-count must be non-negative")
     if args.field_planet_probability is not None and not 0.0 <= args.field_planet_probability <= 1.0:
@@ -1077,16 +1088,31 @@ def main() -> int:
             transit_radius_ratio_min=args.transit_radius_ratio_min,
             transit_radius_ratio_max=args.transit_radius_ratio_max,
         )
-        final_training = _evaluate(
-            model,
-            generator_config,
-            args.start_index,
-            args.pair_count,
-            args.batch_pairs,
-            device,
-            cache_dir,
-            transit_radius_ratio_min=args.transit_radius_ratio_min,
-            transit_radius_ratio_max=args.transit_radius_ratio_max,
+        synthetic_improved = best_holdout is None or final_holdout["errors"] < best_holdout["errors"]
+        should_stop = (
+            args.stop_holdout_errors is not None
+            and final_holdout["errors"] <= args.stop_holdout_errors
+        )
+        should_score_training = (
+            synthetic_improved
+            or should_stop
+            or epoch + 1 == args.max_epochs
+            or (epoch + 1) % args.training_eval_frequency == 0
+        )
+        final_training = (
+            _evaluate(
+                model,
+                generator_config,
+                args.start_index,
+                args.pair_count,
+                args.batch_pairs,
+                device,
+                cache_dir,
+                transit_radius_ratio_min=args.transit_radius_ratio_min,
+                transit_radius_ratio_max=args.transit_radius_ratio_max,
+            )
+            if should_score_training
+            else None
         )
         record = {
             "epoch": epoch,
@@ -1116,6 +1142,7 @@ def main() -> int:
                 "paired_ranking_weight": args.paired_ranking_weight,
                 "paired_ranking_margin": args.paired_ranking_margin,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
+                "training_eval_frequency": args.training_eval_frequency,
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
@@ -1140,16 +1167,26 @@ def main() -> int:
             epoch_temporary,
         )
         os.replace(epoch_temporary, epoch_checkpoint)
-        if best_holdout is None or final_holdout["errors"] < best_holdout["errors"]:
+        if synthetic_improved:
+            if final_training is None:
+                final_training = _evaluate(
+                    model,
+                    generator_config,
+                    args.start_index,
+                    args.pair_count,
+                    args.batch_pairs,
+                    device,
+                    cache_dir,
+                    transit_radius_ratio_min=args.transit_radius_ratio_min,
+                    transit_radius_ratio_max=args.transit_radius_ratio_max,
+                )
+                record["training"] = final_training
             best_epoch = epoch
             best_epoch_checkpoint = epoch_checkpoint
             best_epoch_mean_loss = record["mean_loss"]
             best_training = final_training
             best_holdout = final_holdout
-        if final_training["errors"] == 0 or (
-            args.stop_holdout_errors is not None
-            and final_holdout["errors"] <= args.stop_holdout_errors
-        ):
+        if (final_training is not None and final_training["errors"] == 0) or should_stop:
             break
     if (
         best_holdout is None
@@ -1182,6 +1219,7 @@ def main() -> int:
         "paired_ranking_weight": args.paired_ranking_weight,
         "paired_ranking_margin": args.paired_ranking_margin,
         "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
+        "training_eval_frequency": args.training_eval_frequency,
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
