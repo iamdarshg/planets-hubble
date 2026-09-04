@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import math
 import os
 import random
 import shutil
@@ -898,6 +899,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--progress-log-frequency",
+        type=int,
+        default=0,
+        help="emit lightweight JSON progress every N training batches; 0 disables batch progress logs",
+    )
+    parser.add_argument(
         "--field-star-count",
         type=int,
         help="override the number of background/neighbor stars in each synthetic cutout",
@@ -953,6 +960,8 @@ def main() -> int:
         raise ValueError("auxiliary-event-head-weight must be non-negative")
     if args.training_eval_frequency < 1:
         raise ValueError("training-eval-frequency must be positive")
+    if args.progress_log_frequency < 0:
+        raise ValueError("progress-log-frequency must be non-negative")
     if args.field_star_count is not None and args.field_star_count < 0:
         raise ValueError("field-star-count must be non-negative")
     if args.field_planet_probability is not None and not 0.0 <= args.field_planet_probability <= 1.0:
@@ -1077,6 +1086,22 @@ def main() -> int:
                 raise RuntimeError(
                     f"RSS cap exceeded: {peak_rss} > {args.rss_cap_bytes}"
                 )
+            if args.progress_log_frequency and global_step % args.progress_log_frequency == 0:
+                print(
+                    json.dumps(
+                        {
+                            "event": "train_batch",
+                            "epoch": epoch,
+                            "global_step": global_step,
+                            "epoch_batches_done": len(losses),
+                            "epoch_batches_total": math.ceil(args.pair_count / args.batch_pairs),
+                            "mean_loss_so_far": sum(losses) / len(losses),
+                            "rss_bytes": peak_rss,
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
         final_holdout = _evaluate(
             model,
             generator_config,
@@ -1143,6 +1168,7 @@ def main() -> int:
                 "paired_ranking_margin": args.paired_ranking_margin,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "training_eval_frequency": args.training_eval_frequency,
+                "progress_log_frequency": args.progress_log_frequency,
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
@@ -1220,6 +1246,7 @@ def main() -> int:
         "paired_ranking_margin": args.paired_ranking_margin,
         "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
         "training_eval_frequency": args.training_eval_frequency,
+        "progress_log_frequency": args.progress_log_frequency,
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
