@@ -579,6 +579,7 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_feature_fusion_event,
         model.core.source_photometry_projection,
         model.core.source_photometry_event,
+        model.core.event_evidence_calibration,
     ):
         for parameter in module.parameters():
             parameter.requires_grad = True
@@ -589,6 +590,50 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.event_photometry_weight,
     ):
         parameter.requires_grad = True
+
+
+def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
+    """Reinitialize the compact source-photometry branch after feature shifts."""
+
+    for module in (model.core.source_photometry_projection, model.core.source_photometry_event):
+        module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
+
+
+def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
+    """Reinitialize compact temporal event heads while preserving the backbone."""
+
+    modules = (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
+        model.core.temporal_matched_event,
+        model.core.temporal_sequence_event,
+        model.core.temporal_sequence_projection,
+        model.core.temporal_multiscale_event,
+        model.core.temporal_multiscale_projection,
+        model.core.temporal_feature_fusion_event,
+        model.core.event_evidence_calibration,
+    )
+    for module in modules:
+        module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
+    for module in (
+        model.core.temporal_summary_event,
+        model.core.temporal_shape_event,
+        model.core.temporal_robust_event,
+        model.core.temporal_matched_event,
+        model.core.temporal_sequence_projection,
+        model.core.temporal_multiscale_projection,
+        model.core.temporal_feature_fusion_event,
+        model.core.event_evidence_calibration,
+    ):
+        final = module[-1]
+        final.weight.data.zero_()
+        final.bias.data.zero_()
+    with torch.no_grad():
+        model.core.event_logit_scale.fill_(1.0)
+        model.core.event_source_weight.fill_(1.0)
+        model.core.event_backbone_weight.fill_(0.5)
+        model.core.event_photometry_weight.fill_(0.5)
 
 
 def _rss() -> int:
@@ -692,6 +737,16 @@ def main() -> int:
         help="freeze the backbone and adapt only compact event decision heads",
     )
     parser.add_argument(
+        "--reset-source-photometry-branch",
+        action="store_true",
+        help="reinitialize the compact source-photometry branch after loading a checkpoint",
+    )
+    parser.add_argument(
+        "--reset-temporal-event-heads",
+        action="store_true",
+        help="reinitialize compact temporal event heads after loading a checkpoint",
+    )
+    parser.add_argument(
         "--paired-ranking-weight",
         type=float,
         default=0.0,
@@ -783,6 +838,10 @@ def main() -> int:
     if not args.from_scratch and (args.input_checkpoint is None or not args.input_checkpoint.is_file()):
         raise FileNotFoundError(args.input_checkpoint)
     model = _new_model(device) if args.from_scratch else _load_model(args.input_checkpoint, device)
+    if args.reset_source_photometry_branch:
+        _reset_source_photometry_branch(model)
+    if args.reset_temporal_event_heads:
+        _reset_temporal_event_heads(model)
     if args.train_only_event_heads:
         _freeze_except_event_heads(model)
     if args.loss_mode == "event" and (
@@ -903,6 +962,8 @@ def main() -> int:
                 "negative_loss_weight": args.negative_loss_weight,
                 "paired_ranking_weight": args.paired_ranking_weight,
                 "paired_ranking_margin": args.paired_ranking_margin,
+                "reset_source_photometry_branch": args.reset_source_photometry_branch,
+                "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
@@ -947,6 +1008,8 @@ def main() -> int:
             "negative_loss_weight": args.negative_loss_weight,
             "paired_ranking_weight": args.paired_ranking_weight,
             "paired_ranking_margin": args.paired_ranking_margin,
+            "reset_source_photometry_branch": args.reset_source_photometry_branch,
+            "reset_temporal_event_heads": args.reset_temporal_event_heads,
             "train_only_event_heads": args.train_only_event_heads,
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
@@ -985,6 +1048,8 @@ def main() -> int:
         "negative_loss_weight": args.negative_loss_weight,
         "paired_ranking_weight": args.paired_ranking_weight,
         "paired_ranking_margin": args.paired_ranking_margin,
+        "reset_source_photometry_branch": args.reset_source_photometry_branch,
+        "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
