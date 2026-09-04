@@ -114,6 +114,12 @@ def main() -> int:
     parser.add_argument("--holdout-pairs", type=int, default=128)
     parser.add_argument("--batch-pairs", type=int, default=32)
     parser.add_argument("--stage-count", type=int, default=4)
+    parser.add_argument(
+        "--min-stage-epochs",
+        type=int,
+        default=None,
+        help="Raise every curriculum stage to at least this many epochs.",
+    )
     parser.add_argument("--cycles", type=int, default=1)
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--device", default="cpu")
@@ -131,6 +137,8 @@ def main() -> int:
 
     if args.cycles < 1 or args.stage_count < 1:
         raise ValueError("cycles and stage-count must be positive")
+    if args.min_stage_epochs is not None and args.min_stage_epochs < 1:
+        raise ValueError("min-stage-epochs must be positive")
     if min(args.pair_count, args.holdout_pairs, args.batch_pairs, args.real_batch_size) < 1:
         raise ValueError("batch and pair counts must be positive")
     if args.rss_cap_bytes < 1:
@@ -182,7 +190,7 @@ def main() -> int:
                 "--batch-pairs",
                 str(args.batch_pairs),
                 "--max-epochs",
-                str(stage.max_epochs),
+                str(max(stage.max_epochs, args.min_stage_epochs or stage.max_epochs)),
                 "--learning-rate",
                 str(stage.learning_rate),
                 "--loss-mode",
