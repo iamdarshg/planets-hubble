@@ -63,7 +63,7 @@ def test_model_keeps_source_identity_and_emits_level_specific_logits() -> None:
     assert outputs["source_event_logits"].shape == (1, config.source_top_k)
     assert outputs["visit_event_logits"].shape == (1, 2)
     assert outputs["global_event_logits"].shape == (1,)
-    assert outputs["event_evidence"].shape == (1, 9)
+    assert outputs["event_evidence"].shape == (1, 10)
     assert outputs["event_calibration_logit"].shape == (1,)
     assert outputs["temporal_multiscale_event_logits"].shape == (1,)
     assert outputs["temporal_feature_fusion_event_logits"].shape == (1,)

@@ -848,6 +848,17 @@ class AstroMambaH(nn.Module):
         )
         nn.init.zeros_(self.temporal_feature_fusion_event[-1].weight)
         nn.init.zeros_(self.temporal_feature_fusion_event[-1].bias)
+        # A tiny direct dip-evidence head keeps the target-aperture light
+        # curve visible even when the spatial backbone is learning detector
+        # translations.  It deliberately consumes only observed aperture
+        # statistics, with no ephemeris or simulator-only labels.
+        self.source_dip_event = nn.Sequential(
+            nn.Linear(8, 16),
+            nn.GELU(),
+            nn.Linear(16, 1),
+        )
+        nn.init.zeros_(self.source_dip_event[-1].weight)
+        nn.init.zeros_(self.source_dip_event[-1].bias)
         # The evidence paths above are intentionally additive so each one can
         # be supervised independently.  Their raw sum is not, however, a
         # calibrated probability: a few correlated paths can amplify one
@@ -856,7 +867,7 @@ class AstroMambaH(nn.Module):
         # the already-computed event logits.  Its last layer starts at zero so
         # loading a pre-calibrator checkpoint preserves its predictions.
         self.event_evidence_calibration = nn.Sequential(
-            nn.Linear(9, 32),
+            nn.Linear(10, 32),
             nn.GELU(),
             nn.Linear(32, 1),
         )
@@ -1373,6 +1384,20 @@ class AstroMambaH(nn.Module):
         temporal_feature_fusion_event_logits = self.temporal_feature_fusion_event(
             temporal_feature_fusion
         ).squeeze(-1)
+        source_dip_features = torch.stack(
+            (
+                (delta_masked_min * 100.0).clamp(-20.0, 20.0),
+                (delta_std * 100.0).clamp(0.0, 20.0),
+                (score_masked_min / 5.0).clamp(-20.0, 20.0),
+                (score_std / 5.0).clamp(0.0, 20.0),
+                (center25_delta_min * 100.0).clamp(-20.0, 20.0),
+                (edge_delta_min * 100.0).clamp(-20.0, 20.0),
+                ((edge_delta_min - center25_delta_min) * 100.0).clamp(-20.0, 20.0),
+                pair_neg1.clamp(0.0, 1.0),
+            ),
+            dim=-1,
+        )
+        source_dip_event_logits = self.source_dip_event(source_dip_features).squeeze(-1)
         sequence = source_photometry_values.reshape(batch * visits, score.shape[-1], 2).transpose(1, 2)
         sequence_features = self.temporal_sequence_event(sequence).squeeze(-1)
         sequence_max = sequence_features.new_zeros(sequence_features.shape)
@@ -1407,7 +1432,7 @@ class AstroMambaH(nn.Module):
             source_weight=self.event_source_weight.clamp(0.0, 2.0),
             backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
             photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
-        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits + temporal_feature_fusion_event_logits
+        ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits + temporal_feature_fusion_event_logits + source_dip_event_logits
         event_evidence = torch.stack(
             (
                 pooled_backbone_event_logits,
@@ -1419,6 +1444,7 @@ class AstroMambaH(nn.Module):
                 temporal_robust_event_logits,
                 temporal_matched_event_logits,
                 temporal_sequence_event_logits,
+                source_dip_event_logits,
             ),
             dim=-1,
         )
@@ -1573,6 +1599,7 @@ class AstroMambaH(nn.Module):
             "base_global_event_logits": base_global_event_logits,
             "event_calibration_logit": event_calibration_logit,
             "event_evidence": event_evidence,
+            "source_dip_event_logits": source_dip_event_logits,
             "temporal_multiscale_event_logits": temporal_multiscale_event_logits,
             "temporal_feature_fusion_event_logits": temporal_feature_fusion_event_logits,
             "pooled_backbone_event_logits": pooled_backbone_event_logits,

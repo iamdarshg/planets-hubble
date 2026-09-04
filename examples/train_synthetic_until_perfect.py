@@ -610,6 +610,7 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_multiscale_event,
         model.core.temporal_multiscale_projection,
         model.core.temporal_feature_fusion_event,
+        model.core.source_dip_event,
         model.core.source_photometry_projection,
         model.core.source_photometry_event,
         model.core.event_evidence_calibration,
@@ -645,6 +646,7 @@ def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_multiscale_event,
         model.core.temporal_multiscale_projection,
         model.core.temporal_feature_fusion_event,
+        model.core.source_dip_event,
         model.core.event_evidence_calibration,
     )
     for module in modules:
@@ -657,6 +659,7 @@ def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_sequence_projection,
         model.core.temporal_multiscale_projection,
         model.core.temporal_feature_fusion_event,
+        model.core.source_dip_event,
         model.core.event_evidence_calibration,
     ):
         final = module[-1]

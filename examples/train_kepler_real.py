@@ -618,6 +618,10 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
         "core.temporal_feature_fusion_event.0.bias",
         "core.temporal_feature_fusion_event.2.weight",
         "core.temporal_feature_fusion_event.2.bias",
+        "core.source_dip_event.0.weight",
+        "core.source_dip_event.0.bias",
+        "core.source_dip_event.2.weight",
+        "core.source_dip_event.2.bias",
         "core.event_evidence_calibration.0.weight",
         "core.event_evidence_calibration.0.bias",
         "core.event_evidence_calibration.2.weight",
@@ -656,6 +660,7 @@ def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_multiscale_event,
         model.core.temporal_multiscale_projection,
         model.core.temporal_feature_fusion_event,
+        model.core.source_dip_event,
     )
     for module in modules:
         module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
@@ -667,6 +672,7 @@ def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.temporal_sequence_projection,
         model.core.temporal_multiscale_projection,
         model.core.temporal_feature_fusion_event,
+        model.core.source_dip_event,
     ):
         final = module[-1]
         final.weight.data.zero_()
@@ -712,6 +718,8 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
     for module in (model.core.source_photometry_projection, model.core.source_photometry_event):
         for parameter in module.parameters():
             parameter.requires_grad = True
+    for parameter in model.core.source_dip_event.parameters():
+        parameter.requires_grad = True
     for parameter in model.core.event_evidence_calibration.parameters():
         parameter.requires_grad = True
 
