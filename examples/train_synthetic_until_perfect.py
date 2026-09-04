@@ -486,6 +486,31 @@ def _weighted_event_loss(
     )
 
 
+def _paired_ranking_loss(
+    prediction: dict[str, torch.Tensor],
+    batch: AstroMambaHTrainingBatch,
+    *,
+    margin: float,
+) -> torch.Tensor:
+    """Rank each injected target-transit view above its matched null view."""
+
+    logits = prediction["global_event_logits"].reshape(-1)
+    targets = batch.target.reshape(-1).to(dtype=torch.float32)
+    if logits.numel() < 2:
+        return logits.new_zeros(())
+    pair_count = logits.numel() // 2
+    paired_logits = logits[: pair_count * 2].reshape(pair_count, 2)
+    paired_targets = targets[: pair_count * 2].reshape(pair_count, 2)
+    null_mask = paired_targets[:, 0] < 0.5
+    positive_mask = paired_targets[:, 1] > 0.5
+    valid_pairs = null_mask & positive_mask
+    if not bool(valid_pairs.any()):
+        return logits.new_zeros(())
+    null_logits = paired_logits[valid_pairs, 0]
+    positive_logits = paired_logits[valid_pairs, 1]
+    return torch.nn.functional.softplus(margin - (positive_logits - null_logits)).mean()
+
+
 def _new_model(device: torch.device) -> AstroMambaHTrainingAdapter:
     """Create FP32 master weights for a clean post-contract curriculum."""
 
@@ -618,6 +643,18 @@ def main() -> int:
         action="store_true",
         help="freeze the backbone and adapt only compact event decision heads",
     )
+    parser.add_argument(
+        "--paired-ranking-weight",
+        type=float,
+        default=0.0,
+        help="optional weight for ranking each injected target-transit view above its matched null view",
+    )
+    parser.add_argument(
+        "--paired-ranking-margin",
+        type=float,
+        default=0.5,
+        help="minimum desired injected-minus-null logit margin for paired synthetic ranking",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--cache-dir", type=Path)
@@ -639,6 +676,10 @@ def main() -> int:
         raise ValueError("rss-cap-bytes must be positive")
     if args.positive_loss_weight <= 0.0 or args.negative_loss_weight <= 0.0:
         raise ValueError("loss weights must be positive")
+    if args.paired_ranking_weight < 0.0:
+        raise ValueError("paired-ranking-weight must be non-negative")
+    if args.paired_ranking_margin < 0.0:
+        raise ValueError("paired-ranking-margin must be non-negative")
     if args.stop_holdout_errors is not None and args.stop_holdout_errors < 0:
         raise ValueError("stop-holdout-errors must be non-negative")
     random.seed(args.seed)
@@ -702,6 +743,12 @@ def main() -> int:
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
                 loss = loss_fn(output, batch)
+                if args.paired_ranking_weight > 0.0:
+                    loss = loss + args.paired_ranking_weight * _paired_ranking_loss(
+                        output,
+                        batch,
+                        margin=args.paired_ranking_margin,
+                    )
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite synthetic loss at step {global_step}")
             loss.backward()
@@ -758,6 +805,8 @@ def main() -> int:
                 "loss_mode": args.loss_mode,
                 "positive_loss_weight": args.positive_loss_weight,
                 "negative_loss_weight": args.negative_loss_weight,
+                "paired_ranking_weight": args.paired_ranking_weight,
+                "paired_ranking_margin": args.paired_ranking_margin,
                 "train_only_event_heads": args.train_only_event_heads,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
@@ -797,6 +846,8 @@ def main() -> int:
             "loss_mode": args.loss_mode,
             "positive_loss_weight": args.positive_loss_weight,
             "negative_loss_weight": args.negative_loss_weight,
+            "paired_ranking_weight": args.paired_ranking_weight,
+            "paired_ranking_margin": args.paired_ranking_margin,
             "train_only_event_heads": args.train_only_event_heads,
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
@@ -830,6 +881,8 @@ def main() -> int:
         "loss_mode": args.loss_mode,
         "positive_loss_weight": args.positive_loss_weight,
         "negative_loss_weight": args.negative_loss_weight,
+        "paired_ranking_weight": args.paired_ranking_weight,
+        "paired_ranking_margin": args.paired_ranking_margin,
         "train_only_event_heads": args.train_only_event_heads,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
