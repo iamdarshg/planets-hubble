@@ -7,6 +7,7 @@ import gc
 import json
 import os
 import random
+import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -912,6 +913,11 @@ def main() -> int:
     global_step = 0
     final_training = None
     final_holdout = None
+    best_epoch = None
+    best_epoch_checkpoint = None
+    best_epoch_mean_loss = None
+    best_training = None
+    best_holdout = None
     for epoch in range(args.max_epochs):
         model.train()
         losses: list[float] = []
@@ -1021,50 +1027,28 @@ def main() -> int:
             epoch_temporary,
         )
         os.replace(epoch_temporary, epoch_checkpoint)
+        if best_holdout is None or final_holdout["errors"] < best_holdout["errors"]:
+            best_epoch = epoch
+            best_epoch_checkpoint = epoch_checkpoint
+            best_epoch_mean_loss = record["mean_loss"]
+            best_training = final_training
+            best_holdout = final_holdout
         if final_training["errors"] == 0 or (
             args.stop_holdout_errors is not None
             and final_holdout["errors"] <= args.stop_holdout_errors
         ):
             break
-    if final_holdout is None or final_training is None:
+    if (
+        best_holdout is None
+        or best_training is None
+        or best_epoch_checkpoint is None
+        or best_epoch is None
+    ):
         raise RuntimeError("no synthetic epoch completed")
+    final_holdout = best_holdout
+    final_training = best_training
     temporary = args.output_checkpoint.with_suffix(args.output_checkpoint.suffix + ".tmp")
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
-            "checkpoint_transfer": getattr(model, "_checkpoint_transfer", {}),
-            "optimizer_policy": "AdamW_FP32_master_weights",
-            "parameter_dtypes": sorted({str(parameter.dtype) for parameter in model.parameters()}),
-            "amp_enabled": device.type == "cuda",
-            "amp_dtype": "bfloat16" if device.type == "cuda" else None,
-            "input_mode": "synthetic_detector_8x8_embedded_32x32_source_supervised",
-            "loss_mode": args.loss_mode,
-            "positive_loss_weight": args.positive_loss_weight,
-            "negative_loss_weight": args.negative_loss_weight,
-            "paired_ranking_weight": args.paired_ranking_weight,
-            "paired_ranking_margin": args.paired_ranking_margin,
-            "reset_source_photometry_branch": args.reset_source_photometry_branch,
-            "reset_temporal_event_heads": args.reset_temporal_event_heads,
-            "train_only_event_heads": args.train_only_event_heads,
-            "scene_model": "multi_star_field_target_counterfactual",
-            "field_star_count": generator_config.field_star_count,
-            "field_planet_probability": generator_config.field_planet_probability,
-            "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
-            "transit_radius_ratio_min": args.transit_radius_ratio_min,
-            "transit_radius_ratio_max": args.transit_radius_ratio_max,
-            "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
-            "cache_dir": str(cache_dir),
-            "cache_enabled": True,
-            "pair_count": args.pair_count,
-            "sample_index_first": args.start_index,
-            "sample_index_last": args.start_index + args.pair_count - 1,
-            "holdout": final_holdout,
-            "training": final_training,
-            "history": history,
-        },
-        temporary,
-    )
+    shutil.copy2(best_epoch_checkpoint, temporary)
     os.replace(temporary, args.output_checkpoint)
     peak_gpu = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else 0
     report = {
@@ -1100,6 +1084,9 @@ def main() -> int:
         "holdout_start_index": args.holdout_start_index,
         "holdout": final_holdout,
         "training": final_training,
+        "selected_epoch": best_epoch,
+        "selected_epoch_checkpoint": str(best_epoch_checkpoint),
+        "selected_epoch_mean_loss": best_epoch_mean_loss,
         "history": history,
         "device": str(device),
         "batch_pairs": args.batch_pairs,
