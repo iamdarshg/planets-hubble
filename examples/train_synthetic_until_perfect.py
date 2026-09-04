@@ -757,12 +757,41 @@ def _evaluate(
             del batch, output
     predicted = [int(value >= 0.5) for value in probabilities]
     correct = sum(prediction == label for prediction, label in zip(predicted, labels))
+    best_threshold = 0.5
+    best_threshold_correct = correct
+    for threshold in sorted(set(probabilities)):
+        threshold_predictions = [int(value >= threshold) for value in probabilities]
+        threshold_correct = sum(
+            prediction == label
+            for prediction, label in zip(threshold_predictions, labels)
+        )
+        if threshold_correct > best_threshold_correct:
+            best_threshold = float(threshold)
+            best_threshold_correct = threshold_correct
+    positives = [probability for probability, label in zip(probabilities, labels) if label == 1]
+    negatives = [probability for probability, label in zip(probabilities, labels) if label == 0]
+    pairwise_total = len(positives) * len(negatives)
+    pairwise_wins = 0.0
+    if pairwise_total:
+        for positive in positives:
+            for negative in negatives:
+                if positive > negative:
+                    pairwise_wins += 1.0
+                elif positive == negative:
+                    pairwise_wins += 0.5
     return {
         "pairs": pair_count,
         "samples": len(labels),
         "correct": correct,
         "errors": len(labels) - correct,
         "accuracy": correct / len(labels) if labels else None,
+        "best_threshold": best_threshold,
+        "best_threshold_correct": best_threshold_correct,
+        "best_threshold_errors": len(labels) - best_threshold_correct,
+        "best_threshold_accuracy": best_threshold_correct / len(labels) if labels else None,
+        "probability_auc": pairwise_wins / pairwise_total if pairwise_total else None,
+        "mean_positive_probability": sum(positives) / len(positives) if positives else None,
+        "mean_negative_probability": sum(negatives) / len(negatives) if negatives else None,
         "mean_probability": sum(probabilities) / len(probabilities) if probabilities else None,
         "true_positive": sum(prediction == label == 1 for prediction, label in zip(predicted, labels)),
         "true_negative": sum(prediction == label == 0 for prediction, label in zip(predicted, labels)),
