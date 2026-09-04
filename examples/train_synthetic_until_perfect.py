@@ -27,7 +27,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 15
+CACHE_FORMAT_VERSION = 16
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -108,7 +108,7 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # mode near the measured fractional fluctuation scale; the separate
         # field-star AR(1) process below still supplies crowded-field noise.
         variability_sigma=0.0015,
-        stellar_brightness_noise_sigma=0.006,
+        stellar_brightness_noise_sigma=0.0015,
         stellar_brightness_ar1=0.85,
         stellar_brightness_amplitude_scatter=0.55,
         local_step_spacing_days=0.0204,
@@ -170,7 +170,7 @@ def _sample_target_event_config(
         transit_period_days=float(rng.uniform(2.0, 30.0)),
         transit_epoch_offset_days=epoch_offset,
         transit_duration_hours=float(rng.uniform(1.5, 6.0)),
-        transit_radius_ratio=float(rng.uniform(0.015, 0.07)),
+        transit_radius_ratio=float(rng.uniform(0.006, 0.04)),
         transit_impact_parameter=float(rng.uniform(0.0, 0.85)),
         invalid_exposures=_sample_invalid_exposures(generator_config, rng),
     )
