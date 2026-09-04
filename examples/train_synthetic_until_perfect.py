@@ -27,7 +27,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 13
+CACHE_FORMAT_VERSION = 14
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -96,9 +96,9 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # but expose several unresolved neighbours whose planet-host status
         # is sampled independently and is not used as the event label.
         field_star_count=8,
-        field_planet_probability=0.25,
+        field_planet_probability=0.45,
         field_star_flux_ratio_min=0.03,
-        field_star_flux_ratio_max=0.30,
+        field_star_flux_ratio_max=0.45,
         field_star_min_separation_pixels=1.5,
         # Kepler light curves contain percent-level correlated variability;
         # this is deliberately applied to null and injected counterfactuals
@@ -108,7 +108,7 @@ def _synthetic_config(seed: int) -> SyntheticConfig:
         # mode near the measured fractional fluctuation scale; the separate
         # field-star AR(1) process below still supplies crowded-field noise.
         variability_sigma=0.0015,
-        stellar_brightness_noise_sigma=0.003,
+        stellar_brightness_noise_sigma=0.006,
         stellar_brightness_ar1=0.85,
         stellar_brightness_amplitude_scatter=0.55,
         local_step_spacing_days=0.0204,
@@ -450,6 +450,29 @@ def _load_model(checkpoint: Path, device: torch.device) -> AstroMambaHTrainingAd
     return model
 
 
+def _weighted_event_loss(
+    prediction: dict[str, torch.Tensor],
+    batch: AstroMambaHTrainingBatch,
+    *,
+    positive_weight: float,
+    negative_weight: float,
+) -> torch.Tensor:
+    """Event BCE with explicit class weights for false-positive pressure."""
+
+    target = batch.target.to(dtype=torch.float32)
+    logits = prediction["global_event_logits"]
+    weights = torch.where(
+        target.reshape_as(logits) > 0.5,
+        torch.full_like(logits, positive_weight),
+        torch.full_like(logits, negative_weight),
+    )
+    return torch.nn.functional.binary_cross_entropy_with_logits(
+        logits,
+        target.reshape_as(logits),
+        weight=weights,
+    )
+
+
 def _new_model(device: torch.device) -> AstroMambaHTrainingAdapter:
     """Create FP32 master weights for a clean post-contract curriculum."""
 
@@ -560,6 +583,18 @@ def main() -> int:
     parser.add_argument("--max-epochs", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument(
+        "--positive-loss-weight",
+        type=float,
+        default=1.0,
+        help="event-loss weight for injected target-transit examples",
+    )
+    parser.add_argument(
+        "--negative-loss-weight",
+        type=float,
+        default=1.0,
+        help="event-loss weight for null and off-target-only examples",
+    )
+    parser.add_argument(
         "--loss-mode",
         choices=("event", "source"),
         default="event",
@@ -589,6 +624,8 @@ def main() -> int:
         raise ValueError("pair counts, batch-pairs, and max-epochs must be positive")
     if args.rss_cap_bytes < 1:
         raise ValueError("rss-cap-bytes must be positive")
+    if args.positive_loss_weight <= 0.0 or args.negative_loss_weight <= 0.0:
+        raise ValueError("loss weights must be positive")
     if args.stop_holdout_errors is not None and args.stop_holdout_errors < 0:
         raise ValueError("stop-holdout-errors must be non-negative")
     random.seed(args.seed)
@@ -609,7 +646,17 @@ def main() -> int:
     model = _new_model(device) if args.from_scratch else _load_model(args.input_checkpoint, device)
     if args.train_only_event_heads:
         _freeze_except_event_heads(model)
-    loss_fn = event_only_loss_fn if args.loss_mode == "event" else source_event_loss_fn
+    if args.loss_mode == "event" and (
+        args.positive_loss_weight != 1.0 or args.negative_loss_weight != 1.0
+    ):
+        loss_fn = lambda output, batch: _weighted_event_loss(
+            output,
+            batch,
+            positive_weight=args.positive_loss_weight,
+            negative_weight=args.negative_loss_weight,
+        )
+    else:
+        loss_fn = event_only_loss_fn if args.loss_mode == "event" else source_event_loss_fn
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable_parameters:
         raise RuntimeError("event-head-only mode produced no trainable parameters")
@@ -696,6 +743,8 @@ def main() -> int:
                 "amp_dtype": "bfloat16" if device.type == "cuda" else None,
                 "input_mode": "synthetic_detector_8x8_embedded_32x32_source_supervised",
                 "loss_mode": args.loss_mode,
+                "positive_loss_weight": args.positive_loss_weight,
+                "negative_loss_weight": args.negative_loss_weight,
                 "train_only_event_heads": args.train_only_event_heads,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
@@ -733,6 +782,8 @@ def main() -> int:
             "amp_dtype": "bfloat16" if device.type == "cuda" else None,
             "input_mode": "synthetic_detector_8x8_embedded_32x32_source_supervised",
             "loss_mode": args.loss_mode,
+            "positive_loss_weight": args.positive_loss_weight,
+            "negative_loss_weight": args.negative_loss_weight,
             "train_only_event_heads": args.train_only_event_heads,
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
@@ -764,6 +815,8 @@ def main() -> int:
         "views_trained": args.pair_count * 2,
         "scene_model": "multi_star_field_target_counterfactual",
         "loss_mode": args.loss_mode,
+        "positive_loss_weight": args.positive_loss_weight,
+        "negative_loss_weight": args.negative_loss_weight,
         "train_only_event_heads": args.train_only_event_heads,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
