@@ -664,6 +664,22 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         parameter.requires_grad = True
 
 
+def _freeze_except_event_calibration(model: AstroMambaHTrainingAdapter) -> None:
+    """Train only the bounded global event calibration parameters and head."""
+
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    for parameter in (
+        model.core.event_logit_scale,
+        model.core.event_source_weight,
+        model.core.event_backbone_weight,
+        model.core.event_photometry_weight,
+    ):
+        parameter.requires_grad = True
+    for parameter in model.core.event_evidence_calibration.parameters():
+        parameter.requires_grad = True
+
+
 def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
     """Reinitialize the compact source-photometry branch after feature shifts."""
 
@@ -840,6 +856,11 @@ def main() -> int:
         help="freeze the backbone and adapt only compact event decision heads",
     )
     parser.add_argument(
+        "--train-only-event-calibration",
+        action="store_true",
+        help="freeze feature heads and train only bounded global event calibration",
+    )
+    parser.add_argument(
         "--reset-source-photometry-branch",
         action="store_true",
         help="reinitialize the compact source-photometry branch after loading a checkpoint",
@@ -955,6 +976,8 @@ def main() -> int:
         _reset_temporal_event_heads(model)
     if args.train_only_event_heads:
         _freeze_except_event_heads(model)
+    if args.train_only_event_calibration:
+        _freeze_except_event_calibration(model)
     if args.loss_mode == "event" and (
         args.positive_loss_weight != 1.0 or args.negative_loss_weight != 1.0
     ):
@@ -1096,6 +1119,7 @@ def main() -> int:
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
+                "train_only_event_calibration": args.train_only_event_calibration,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
                 "field_planet_probability": generator_config.field_planet_probability,
@@ -1161,6 +1185,7 @@ def main() -> int:
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
+        "train_only_event_calibration": args.train_only_event_calibration,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
         "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
