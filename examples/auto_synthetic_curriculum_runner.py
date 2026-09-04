@@ -145,6 +145,7 @@ def main() -> int:
     parser.add_argument("--reset-source-photometry-branch", action="store_true")
     parser.add_argument("--reset-temporal-event-heads", action="store_true")
     parser.add_argument("--train-only-event-heads", action="store_true")
+    parser.add_argument("--train-only-event-calibration", action="store_true")
     args = parser.parse_args()
 
     if args.cycles < 1 or args.stage_count < 1:
@@ -250,6 +251,8 @@ def main() -> int:
                 command.append("--reset-temporal-event-heads")
             if args.train_only_event_heads:
                 command.append("--train-only-event-heads")
+            if args.train_only_event_calibration:
+                command.append("--train-only-event-calibration")
 
             exit_code = _run_child(command, cwd=repo)
             report_path = output_checkpoint.with_suffix(".report.json")
@@ -277,6 +280,7 @@ def main() -> int:
                 "synthetic_improved": synthetic_improved,
                 "loss_mode": args.loss_mode,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
+                "train_only_event_calibration": args.train_only_event_calibration,
                 "best_synthetic_checkpoint": str(best_synthetic_checkpoint) if best_synthetic_checkpoint else None,
                 "best_synthetic_errors": best_synthetic_errors,
                 "rss_cap_bytes": args.rss_cap_bytes,
