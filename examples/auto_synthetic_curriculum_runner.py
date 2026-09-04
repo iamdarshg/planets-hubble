@@ -235,11 +235,17 @@ def main() -> int:
             if synthetic_improved:
                 best_synthetic_errors = errors
                 best_synthetic_checkpoint = output_checkpoint.resolve()
-            current_checkpoint = output_checkpoint.resolve()
+            if synthetic_improved or errors <= args.synthetic_error_gate:
+                current_checkpoint = output_checkpoint.resolve()
+                advanced_checkpoint = output_checkpoint.resolve()
+            else:
+                current_checkpoint = best_synthetic_checkpoint
+                advanced_checkpoint = best_synthetic_checkpoint
             entry: dict[str, object] = {
                 "cycle": cycle + 1,
                 "stage": stage.name,
                 "checkpoint": str(output_checkpoint.resolve()),
+                "advanced_checkpoint": str(advanced_checkpoint) if advanced_checkpoint else None,
                 "synthetic_exit_code": exit_code,
                 "synthetic_status": report.get("status"),
                 "synthetic_holdout": report.get("holdout"),
