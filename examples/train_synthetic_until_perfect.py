@@ -148,6 +148,9 @@ def _source_position(generator_config: SyntheticConfig, sample_index: int) -> tu
 def _sample_target_event_config(
     generator_config: SyntheticConfig,
     sample_index: int,
+    *,
+    transit_radius_ratio_min: float = 0.006,
+    transit_radius_ratio_max: float = 0.04,
 ) -> SyntheticConfig:
     """Vary target-transit morphology while keeping every positive observable.
 
@@ -170,10 +173,29 @@ def _sample_target_event_config(
         transit_period_days=float(rng.uniform(2.0, 30.0)),
         transit_epoch_offset_days=epoch_offset,
         transit_duration_hours=float(rng.uniform(1.5, 6.0)),
-        transit_radius_ratio=float(rng.uniform(0.006, 0.04)),
+        transit_radius_ratio=float(rng.uniform(transit_radius_ratio_min, transit_radius_ratio_max)),
         transit_impact_parameter=float(rng.uniform(0.0, 0.85)),
         invalid_exposures=_sample_invalid_exposures(generator_config, rng),
     )
+
+
+def _apply_curriculum_overrides(
+    generator_config: SyntheticConfig,
+    *,
+    field_star_count: int | None,
+    field_planet_probability: float | None,
+    stellar_brightness_noise_sigma: float | None,
+) -> SyntheticConfig:
+    """Apply explicit synthetic difficulty controls for staged curricula."""
+
+    updates: dict[str, object] = {}
+    if field_star_count is not None:
+        updates["field_star_count"] = field_star_count
+    if field_planet_probability is not None:
+        updates["field_planet_probability"] = field_planet_probability
+    if stellar_brightness_noise_sigma is not None:
+        updates["stellar_brightness_noise_sigma"] = stellar_brightness_noise_sigma
+    return replace(generator_config, **updates) if updates else generator_config
 
 
 def _sample_invalid_exposures(
@@ -288,12 +310,20 @@ def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 8, canvas: int = 
 def _generate_pair(
     generator_config: SyntheticConfig,
     sample_index: int,
+    *,
+    transit_radius_ratio_min: float = 0.006,
+    transit_radius_ratio_max: float = 0.04,
 ) -> tuple[list[dict[str, np.ndarray]], list[float], list[tuple[float, float]]]:
     """Generate one null/injected pair with an isolated deterministic seed."""
 
     source_x, source_y = _source_position(generator_config, sample_index)
     bundle_config = replace(
-        _sample_target_event_config(generator_config, sample_index),
+        _sample_target_event_config(
+            generator_config,
+            sample_index,
+            transit_radius_ratio_min=transit_radius_ratio_min,
+            transit_radius_ratio_max=transit_radius_ratio_max,
+        ),
         seed=generator_config.seed + sample_index,
         source_x=source_x,
         source_y=source_y,
@@ -338,6 +368,9 @@ def _make_batch(
     pair_count: int,
     device: torch.device,
     cache_path: Path | None = None,
+    *,
+    transit_radius_ratio_min: float = 0.006,
+    transit_radius_ratio_max: float = 0.04,
 ) -> AstroMambaHTrainingBatch:
     cached_arrays: dict[str, np.ndarray] | None = None
     cached_labels: np.ndarray | None = None
@@ -375,13 +408,23 @@ def _make_batch(
         worker_count = min(4, pair_count)
         if worker_count == 1:
             generated_pairs = map(
-                lambda index: _generate_pair(generator_config, index),
+                lambda index: _generate_pair(
+                    generator_config,
+                    index,
+                    transit_radius_ratio_min=transit_radius_ratio_min,
+                    transit_radius_ratio_max=transit_radius_ratio_max,
+                ),
                 pair_indices,
             )
         else:
             executor = ThreadPoolExecutor(max_workers=worker_count)
             generated_pairs = executor.map(
-                lambda index: _generate_pair(generator_config, index),
+                lambda index: _generate_pair(
+                    generator_config,
+                    index,
+                    transit_radius_ratio_min=transit_radius_ratio_min,
+                    transit_radius_ratio_max=transit_radius_ratio_max,
+                ),
                 pair_indices,
             )
         try:
@@ -569,6 +612,9 @@ def _evaluate(
     batch_pairs: int,
     device: torch.device,
     cache_dir: Path,
+    *,
+    transit_radius_ratio_min: float = 0.006,
+    transit_radius_ratio_max: float = 0.04,
 ) -> dict[str, object]:
     model.eval()
     labels: list[int] = []
@@ -582,6 +628,8 @@ def _evaluate(
                 count,
                 device,
                 _batch_cache_path(cache_dir, start_index + offset, count),
+                transit_radius_ratio_min=transit_radius_ratio_min,
+                transit_radius_ratio_max=transit_radius_ratio_max,
             )
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
@@ -655,6 +703,33 @@ def main() -> int:
         default=0.5,
         help="minimum desired injected-minus-null logit margin for paired synthetic ranking",
     )
+    parser.add_argument(
+        "--field-star-count",
+        type=int,
+        help="override the number of background/neighbor stars in each synthetic cutout",
+    )
+    parser.add_argument(
+        "--field-planet-probability",
+        type=float,
+        help="override per-neighbor probability of an off-target transit-bearing planet",
+    )
+    parser.add_argument(
+        "--stellar-brightness-noise-sigma",
+        type=float,
+        help="override target-star brightness fluctuation sigma for staged synthetic curricula",
+    )
+    parser.add_argument(
+        "--transit-radius-ratio-min",
+        type=float,
+        default=0.006,
+        help="minimum sampled target transit radius ratio",
+    )
+    parser.add_argument(
+        "--transit-radius-ratio-max",
+        type=float,
+        default=0.04,
+        help="maximum sampled target transit radius ratio",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=8192)
     parser.add_argument("--cache-dir", type=Path)
@@ -680,6 +755,16 @@ def main() -> int:
         raise ValueError("paired-ranking-weight must be non-negative")
     if args.paired_ranking_margin < 0.0:
         raise ValueError("paired-ranking-margin must be non-negative")
+    if args.field_star_count is not None and args.field_star_count < 0:
+        raise ValueError("field-star-count must be non-negative")
+    if args.field_planet_probability is not None and not 0.0 <= args.field_planet_probability <= 1.0:
+        raise ValueError("field-planet-probability must be in [0, 1]")
+    if args.stellar_brightness_noise_sigma is not None and args.stellar_brightness_noise_sigma < 0.0:
+        raise ValueError("stellar-brightness-noise-sigma must be non-negative")
+    if args.transit_radius_ratio_min < 0.0 or args.transit_radius_ratio_max < 0.0:
+        raise ValueError("transit radius ratio bounds must be non-negative")
+    if args.transit_radius_ratio_min > args.transit_radius_ratio_max:
+        raise ValueError("transit-radius-ratio-min cannot exceed transit-radius-ratio-max")
     if args.stop_holdout_errors is not None and args.stop_holdout_errors < 0:
         raise ValueError("stop-holdout-errors must be non-negative")
     random.seed(args.seed)
@@ -715,7 +800,12 @@ def main() -> int:
     if not trainable_parameters:
         raise RuntimeError("event-head-only mode produced no trainable parameters")
     optimizer = torch.optim.AdamW(trainable_parameters, lr=args.learning_rate, weight_decay=1e-4)
-    generator_config = _synthetic_config(seed=23)
+    generator_config = _apply_curriculum_overrides(
+        _synthetic_config(seed=23),
+        field_star_count=args.field_star_count,
+        field_planet_probability=args.field_planet_probability,
+        stellar_brightness_noise_sigma=args.stellar_brightness_noise_sigma,
+    )
     cache_dir = args.cache_dir or args.output_checkpoint.parent / "multistar-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
     args.output_checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -738,6 +828,8 @@ def main() -> int:
                 count,
                 device,
                 _batch_cache_path(cache_dir, args.start_index + offset, count),
+                transit_radius_ratio_min=args.transit_radius_ratio_min,
+                transit_radius_ratio_max=args.transit_radius_ratio_max,
             )
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -770,6 +862,8 @@ def main() -> int:
             args.batch_pairs,
             device,
             cache_dir,
+            transit_radius_ratio_min=args.transit_radius_ratio_min,
+            transit_radius_ratio_max=args.transit_radius_ratio_max,
         )
         final_training = _evaluate(
             model,
@@ -779,6 +873,8 @@ def main() -> int:
             args.batch_pairs,
             device,
             cache_dir,
+            transit_radius_ratio_min=args.transit_radius_ratio_min,
+            transit_radius_ratio_max=args.transit_radius_ratio_max,
         )
         record = {
             "epoch": epoch,
@@ -811,6 +907,9 @@ def main() -> int:
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
                 "field_planet_probability": generator_config.field_planet_probability,
+                "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
+                "transit_radius_ratio_min": args.transit_radius_ratio_min,
+                "transit_radius_ratio_max": args.transit_radius_ratio_max,
                 "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
                 "cache_dir": str(cache_dir),
                 "cache_enabled": True,
@@ -852,6 +951,9 @@ def main() -> int:
             "scene_model": "multi_star_field_target_counterfactual",
             "field_star_count": generator_config.field_star_count,
             "field_planet_probability": generator_config.field_planet_probability,
+            "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
+            "transit_radius_ratio_min": args.transit_radius_ratio_min,
+            "transit_radius_ratio_max": args.transit_radius_ratio_max,
             "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
             "cache_dir": str(cache_dir),
             "cache_enabled": True,
@@ -886,6 +988,9 @@ def main() -> int:
         "train_only_event_heads": args.train_only_event_heads,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
+        "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
+        "transit_radius_ratio_min": args.transit_radius_ratio_min,
+        "transit_radius_ratio_max": args.transit_radius_ratio_max,
         "source_position_policy": "deterministic_noncentral_normal_center_0.60_0.49_spread_0.09_0.10",
         "cache_dir": str(cache_dir),
         "cache_enabled": True,
