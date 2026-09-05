@@ -710,7 +710,11 @@ def _new_model(device: torch.device) -> AstroMambaHTrainingAdapter:
     return model
 
 
-def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
+def _freeze_except_event_heads(
+    model: AstroMambaHTrainingAdapter,
+    *,
+    train_source_tokenizer: bool = False,
+) -> None:
     """Keep the learned representation fixed during synthetic recalibration."""
 
     for parameter in model.parameters():
@@ -731,6 +735,9 @@ def _freeze_except_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.event_evidence_calibration,
     ):
         for parameter in module.parameters():
+            parameter.requires_grad = True
+    if train_source_tokenizer:
+        for parameter in model.core.source_tokenizer.parameters():
             parameter.requires_grad = True
     for parameter in (
         model.core.event_logit_scale,
@@ -962,6 +969,11 @@ def main() -> int:
         help="freeze the backbone and adapt only compact event decision heads",
     )
     parser.add_argument(
+        "--train-source-tokenizer-with-event-heads",
+        action="store_true",
+        help="when freezing to event heads, also train compact source-tokenizer/proposal parameters",
+    )
+    parser.add_argument(
         "--train-only-event-calibration",
         action="store_true",
         help="freeze feature heads and train only bounded global event calibration",
@@ -1123,7 +1135,10 @@ def main() -> int:
     if args.reset_temporal_event_heads:
         _reset_temporal_event_heads(model)
     if args.train_only_event_heads:
-        _freeze_except_event_heads(model)
+        _freeze_except_event_heads(
+            model,
+            train_source_tokenizer=args.train_source_tokenizer_with_event_heads,
+        )
     if args.train_only_event_calibration:
         _freeze_except_event_calibration(model)
     if args.loss_mode == "event" and (
@@ -1315,6 +1330,7 @@ def main() -> int:
                 "zero_event_photometry_weight": args.zero_event_photometry_weight,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
+                "train_source_tokenizer_with_event_heads": args.train_source_tokenizer_with_event_heads,
                 "train_only_event_calibration": args.train_only_event_calibration,
                 "scene_model": "multi_star_field_target_counterfactual",
                 "field_star_count": generator_config.field_star_count,
@@ -1415,6 +1431,7 @@ def main() -> int:
         "zero_event_photometry_weight": args.zero_event_photometry_weight,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
+        "train_source_tokenizer_with_event_heads": args.train_source_tokenizer_with_event_heads,
         "train_only_event_calibration": args.train_only_event_calibration,
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
