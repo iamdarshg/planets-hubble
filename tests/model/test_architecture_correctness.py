@@ -120,6 +120,24 @@ def test_global_event_logit_uses_source_conditioned_evidence() -> None:
     assert result.item() < 0.0
 
 
+def test_global_event_logit_allows_bounded_signed_evidence_weights() -> None:
+    pooled_backbone = torch.tensor([1.0])
+    source_event = torch.tensor([[1.0]])
+    source_photometry = torch.tensor([[4.0]])
+
+    result = combine_source_conditioned_event_logits(
+        pooled_backbone,
+        source_event,
+        source_photometry,
+        source_weight=1.0,
+        backbone_weight=0.0,
+        photometry_weight=-0.5,
+    )
+
+    assert result.shape == (1,)
+    assert torch.allclose(result, torch.tensor([-1.0]))
+
+
 def test_zero_initialized_event_calibrator_preserves_base_logit() -> None:
     config = tiny_config()
     model = AstroMambaH(config).eval()

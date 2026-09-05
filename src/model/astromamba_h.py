@@ -64,8 +64,8 @@ def combine_source_conditioned_event_logits(
         raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
     if source_photometry_event_logits.shape != (pooled_backbone_logits.shape[0], 1):
         raise ValueError("source_photometry_event_logits must have shape [batch, 1]")
-    if not 0.0 <= source_weight <= 2.0 or not 0.0 <= backbone_weight <= 2.0 or not 0.0 <= photometry_weight <= 2.0:
-        raise ValueError("evidence weights must be in [0, 2]")
+    if not -2.0 <= source_weight <= 2.0 or not -2.0 <= backbone_weight <= 2.0 or not -2.0 <= photometry_weight <= 2.0:
+        raise ValueError("evidence weights must be in [-2, 2]")
     return (
         source_weight * source_event_logits[:, 0]
         + backbone_weight * pooled_backbone_logits
@@ -1429,9 +1429,9 @@ class AstroMambaH(nn.Module):
             pooled_backbone_event_logits,
             source_event_logits,
             source_photometry_event_logits,
-            source_weight=self.event_source_weight.clamp(0.0, 2.0),
-            backbone_weight=self.event_backbone_weight.clamp(0.0, 2.0),
-            photometry_weight=self.event_photometry_weight.clamp(0.0, 2.0),
+            source_weight=self.event_source_weight.clamp(-2.0, 2.0),
+            backbone_weight=self.event_backbone_weight.clamp(-2.0, 2.0),
+            photometry_weight=self.event_photometry_weight.clamp(-2.0, 2.0),
         ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits + temporal_feature_fusion_event_logits + source_dip_event_logits
         event_evidence = torch.stack(
             (
