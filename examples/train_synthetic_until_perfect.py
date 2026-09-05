@@ -29,7 +29,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 19
+CACHE_FORMAT_VERSION = 20
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -503,7 +503,7 @@ def _make_batch(
                     stream,
                     **cached_arrays,
                     labels=cached_labels,
-                    source_xy=_embed_source_xy(cached_source_xy),
+                    source_xy=cached_source_xy,
                     cache_version=np.asarray(CACHE_FORMAT_VERSION, dtype=np.int64),
                 )
             os.replace(temporary, cache_path)
