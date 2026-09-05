@@ -771,6 +771,14 @@ def _reset_source_photometry_branch(model: AstroMambaHTrainingAdapter) -> None:
         module.apply(lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None)
 
 
+def _reset_source_tokenizer(model: AstroMambaHTrainingAdapter) -> None:
+    """Reinitialize compact source proposal parameters after anchor-contract changes."""
+
+    model.core.source_tokenizer.apply(
+        lambda child: child.reset_parameters() if hasattr(child, "reset_parameters") else None
+    )
+
+
 def _zero_event_photometry_weight(model: AstroMambaHTrainingAdapter) -> None:
     """Disable the direct photometry shortcut while preserving calibrator evidence."""
 
@@ -814,7 +822,7 @@ def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
         model.core.event_logit_scale.fill_(1.0)
         model.core.event_source_weight.fill_(1.0)
         model.core.event_backbone_weight.fill_(0.5)
-        model.core.event_photometry_weight.fill_(0.5)
+        model.core.event_photometry_weight.zero_()
 
 
 def _rss() -> int:
@@ -984,6 +992,11 @@ def main() -> int:
         help="reinitialize the compact source-photometry branch after loading a checkpoint",
     )
     parser.add_argument(
+        "--reset-source-tokenizer",
+        action="store_true",
+        help="reinitialize compact source-tokenizer/proposal parameters after loading a checkpoint",
+    )
+    parser.add_argument(
         "--zero-event-photometry-weight",
         action="store_true",
         help="zero the direct photometry contribution after loading a checkpoint",
@@ -1130,6 +1143,8 @@ def main() -> int:
     model = _new_model(device) if args.from_scratch else _load_model(args.input_checkpoint, device)
     if args.reset_source_photometry_branch:
         _reset_source_photometry_branch(model)
+    if args.reset_source_tokenizer:
+        _reset_source_tokenizer(model)
     if args.zero_event_photometry_weight:
         _zero_event_photometry_weight(model)
     if args.reset_temporal_event_heads:
@@ -1327,6 +1342,7 @@ def main() -> int:
                 "defer_training_eval_until_final": args.defer_training_eval_until_final,
                 "progress_log_frequency": args.progress_log_frequency,
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
+                "reset_source_tokenizer": args.reset_source_tokenizer,
                 "zero_event_photometry_weight": args.zero_event_photometry_weight,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
@@ -1428,6 +1444,7 @@ def main() -> int:
         "defer_training_eval_until_final": args.defer_training_eval_until_final,
         "progress_log_frequency": args.progress_log_frequency,
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
+        "reset_source_tokenizer": args.reset_source_tokenizer,
         "zero_event_photometry_weight": args.zero_event_photometry_weight,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
