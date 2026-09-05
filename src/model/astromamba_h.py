@@ -867,7 +867,7 @@ class AstroMambaH(nn.Module):
         # the already-computed event logits.  Its last layer starts at zero so
         # loading a pre-calibrator checkpoint preserves its predictions.
         self.event_evidence_calibration = nn.Sequential(
-            nn.Linear(10, 32),
+            nn.Linear(12, 32),
             nn.GELU(),
             nn.Linear(32, 1),
         )
@@ -1444,6 +1444,8 @@ class AstroMambaH(nn.Module):
                 temporal_robust_event_logits,
                 temporal_matched_event_logits,
                 temporal_sequence_event_logits,
+                temporal_multiscale_event_logits,
+                temporal_feature_fusion_event_logits,
                 source_dip_event_logits,
             ),
             dim=-1,
