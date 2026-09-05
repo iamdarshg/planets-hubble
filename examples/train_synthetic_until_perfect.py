@@ -786,6 +786,40 @@ def _zero_event_photometry_weight(model: AstroMambaHTrainingAdapter) -> None:
         model.core.event_photometry_weight.zero_()
 
 
+def _initialize_source_dip_event_prior(model: AstroMambaHTrainingAdapter) -> None:
+    """Seed the target-aperture dip head with the physically expected sign.
+
+    The source-dip features are observed photometry summaries only: negative
+    target-aperture deltas and negative robust cadence scores should increase
+    event evidence, while a quiet edge and repeated low-score cadences should
+    reinforce the same decision.  This is an initialization, not a frozen rule,
+    so later synthetic/real training can still correct the weights.
+    """
+
+    head = model.core.source_dip_event
+    first = head[0]
+    final = head[-1]
+    if first.weight.shape != (16, 8) or final.weight.shape != (1, 16):
+        raise RuntimeError("unexpected source_dip_event shape for dip prior")
+    with torch.no_grad():
+        first.weight.zero_()
+        first.bias.zero_()
+        # Negative values in these features mean the target aperture dimmed.
+        first.weight[0, 0] = -0.45  # global minimum flux delta
+        first.weight[1, 2] = -0.45  # global minimum robust score
+        first.weight[2, 4] = -0.65  # central-window minimum flux delta
+        # Positive values mean the center is deeper than the sideband/edge.
+        first.weight[3, 6] = 0.55
+        first.weight[4, 7] = 1.25  # adjacent low-score cadence fraction
+        final.weight.zero_()
+        final.bias.zero_()
+        final.weight[0, 0] = 0.85
+        final.weight[0, 1] = 0.85
+        final.weight[0, 2] = 1.00
+        final.weight[0, 3] = 0.75
+        final.weight[0, 4] = 0.75
+
+
 def _reset_temporal_event_heads(model: AstroMambaHTrainingAdapter) -> None:
     """Reinitialize compact temporal event heads while preserving the backbone."""
 
@@ -1002,6 +1036,11 @@ def main() -> int:
         help="zero the direct photometry contribution after loading a checkpoint",
     )
     parser.add_argument(
+        "--initialize-source-dip-event-prior",
+        action="store_true",
+        help="seed the target-aperture dip head with the physically expected transit sign",
+    )
+    parser.add_argument(
         "--reset-temporal-event-heads",
         action="store_true",
         help="reinitialize compact temporal event heads after loading a checkpoint",
@@ -1149,6 +1188,8 @@ def main() -> int:
         _zero_event_photometry_weight(model)
     if args.reset_temporal_event_heads:
         _reset_temporal_event_heads(model)
+    if args.initialize_source_dip_event_prior:
+        _initialize_source_dip_event_prior(model)
     if args.train_only_event_heads:
         _freeze_except_event_heads(
             model,
@@ -1344,6 +1385,7 @@ def main() -> int:
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_source_tokenizer": args.reset_source_tokenizer,
                 "zero_event_photometry_weight": args.zero_event_photometry_weight,
+                "initialize_source_dip_event_prior": args.initialize_source_dip_event_prior,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
                 "train_only_event_heads": args.train_only_event_heads,
                 "train_source_tokenizer_with_event_heads": args.train_source_tokenizer_with_event_heads,
@@ -1446,6 +1488,7 @@ def main() -> int:
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_source_tokenizer": args.reset_source_tokenizer,
         "zero_event_photometry_weight": args.zero_event_photometry_weight,
+        "initialize_source_dip_event_prior": args.initialize_source_dip_event_prior,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
         "train_only_event_heads": args.train_only_event_heads,
         "train_source_tokenizer_with_event_heads": args.train_source_tokenizer_with_event_heads,
