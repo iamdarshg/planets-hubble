@@ -750,7 +750,12 @@ class AstroMambaH(nn.Module):
         self.event_logit_scale = nn.Parameter(torch.tensor(1.0))
         self.event_source_weight = nn.Parameter(torch.tensor(1.0))
         self.event_backbone_weight = nn.Parameter(torch.tensor(0.5))
-        self.event_photometry_weight = nn.Parameter(torch.tensor(0.5))
+        # The compact photometry head can be useful evidence, but on rich
+        # multi-star synthetic fields it is also the easiest path to learn a
+        # field-level brightness shortcut.  Keep it available to the learned
+        # evidence calibrator below, while making the direct base-logit path
+        # neutral until training proves a signed contribution is helpful.
+        self.event_photometry_weight = nn.Parameter(torch.tensor(0.0))
         # A compact, explicitly temporal evidence path.  Its final layer is
         # zero-initialized below so checkpoints created before this head was
         # added retain their previous predictions until the new evidence is
