@@ -29,7 +29,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 18
+CACHE_FORMAT_VERSION = 19
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -411,7 +411,8 @@ def _generate_pair(
         embedded["wavelength_tokens"] = wavelength_tokens
         views.append(embedded)
         labels.append(label)
-        source_positions.append((source_x, source_y))
+        embedded_source_xy = np.asarray(embedded["object_tokens"][0, 0, 0, :2], dtype=np.float32)
+        source_positions.append((float(embedded_source_xy[0]), float(embedded_source_xy[1])))
     return views, labels, source_positions
 
 
@@ -509,10 +510,9 @@ def _make_batch(
 
     if cached_source_xy is None:
         raise RuntimeError("source positions were not loaded")
-    # New caches store canvas coordinates; freshly generated arrays still have
-    # detector-local coordinates and are converted before tensor creation.
-    if generated:
-        cached_source_xy = _embed_source_xy(cached_source_xy)
+    # Cache version 19+ stores the actual embedded canvas coordinates. Older
+    # centered-coordinate caches are intentionally invalidated above because
+    # non-centered compact canvases make those source anchors wrong.
     source_target = np.stack(
         [
             _compact_source_target_map(
