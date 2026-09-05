@@ -1438,18 +1438,25 @@ class AstroMambaH(nn.Module):
             backbone_weight=self.event_backbone_weight.clamp(-2.0, 2.0),
             photometry_weight=self.event_photometry_weight.clamp(-2.0, 2.0),
         ) + temporal_summary_event_logits + temporal_shape_event_logits + temporal_robust_event_logits + temporal_matched_event_logits + temporal_sequence_event_logits + temporal_feature_fusion_event_logits + source_dip_event_logits
+        neutral_event_evidence = torch.zeros_like(pooled_backbone_event_logits)
+        # Keep empirically fragile/inverted heads inspectable in the forward
+        # output, but do not let them steer the global detector by default.
+        # The compact source-photometry and multiscale sequence heads have
+        # repeatedly learned backwards synthetic evidence on crowded fields;
+        # downstream calibration gets neutral placeholders in their fixed
+        # slots until a later curriculum proves they are trustworthy.
         event_evidence = torch.stack(
             (
                 pooled_backbone_event_logits,
                 source_event_logits[:, 0],
-                source_photometry_event_logits[:, 0],
+                neutral_event_evidence,
                 visit_event_logits.max(dim=1).values,
                 temporal_summary_event_logits,
                 temporal_shape_event_logits,
                 temporal_robust_event_logits,
                 temporal_matched_event_logits,
                 temporal_sequence_event_logits,
-                temporal_multiscale_event_logits,
+                neutral_event_evidence,
                 temporal_feature_fusion_event_logits,
                 source_dip_event_logits,
             ),
@@ -1458,7 +1465,6 @@ class AstroMambaH(nn.Module):
         event_calibration_logit = self.event_evidence_calibration(event_evidence).squeeze(-1)
         global_event_logits = (
             base_global_event_logits
-            + temporal_multiscale_event_logits
             + event_calibration_logit
         ) * self.event_logit_scale.clamp(0.25, 4.0)
         frame_event_logits = source_frame_event_logits.mean(dim=3)
