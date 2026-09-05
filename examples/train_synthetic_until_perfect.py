@@ -921,6 +921,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--defer-training-eval-until-final",
+        action="store_true",
+        help=(
+            "skip full synthetic training-set evaluation during improving epochs; "
+            "the selected best checkpoint is still scored once before writing the final report"
+        ),
+    )
+    parser.add_argument(
         "--progress-log-frequency",
         type=int,
         default=0,
@@ -1144,7 +1152,7 @@ def main() -> int:
             and final_holdout["errors"] <= args.stop_holdout_errors
         )
         should_score_training = (
-            synthetic_improved
+            (synthetic_improved and not args.defer_training_eval_until_final)
             or should_stop
             or epoch + 1 == args.max_epochs
             or (epoch + 1) % args.training_eval_frequency == 0
@@ -1196,6 +1204,7 @@ def main() -> int:
                 "paired_ranking_margin": args.paired_ranking_margin,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "training_eval_frequency": args.training_eval_frequency,
+                "defer_training_eval_until_final": args.defer_training_eval_until_final,
                 "progress_log_frequency": args.progress_log_frequency,
                 "reset_source_photometry_branch": args.reset_source_photometry_branch,
                 "reset_temporal_event_heads": args.reset_temporal_event_heads,
@@ -1222,7 +1231,7 @@ def main() -> int:
         )
         os.replace(epoch_temporary, epoch_checkpoint)
         if synthetic_improved:
-            if final_training is None:
+            if final_training is None and not args.defer_training_eval_until_final:
                 final_training = _evaluate(
                     model,
                     generator_config,
@@ -1247,11 +1256,27 @@ def main() -> int:
             break
     if (
         best_holdout is None
-        or best_training is None
         or best_epoch_checkpoint is None
         or best_epoch is None
     ):
         raise RuntimeError("no synthetic epoch completed")
+    if best_training is None:
+        best_state = torch.load(best_epoch_checkpoint, map_location=device, weights_only=False)
+        model.load_state_dict(best_state["model"], strict=False)
+        best_training = _evaluate(
+            model,
+            generator_config,
+            args.start_index,
+            args.pair_count,
+            args.batch_pairs,
+            device,
+            cache_dir,
+            transit_radius_ratio_min=args.transit_radius_ratio_min,
+            transit_radius_ratio_max=args.transit_radius_ratio_max,
+            progress_label="training",
+            progress_epoch=best_epoch,
+            progress_log_frequency=args.progress_log_frequency,
+        )
     final_holdout = best_holdout
     final_training = best_training
     temporary = args.output_checkpoint.with_suffix(args.output_checkpoint.suffix + ".tmp")
@@ -1277,6 +1302,7 @@ def main() -> int:
         "paired_ranking_margin": args.paired_ranking_margin,
         "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
         "training_eval_frequency": args.training_eval_frequency,
+        "defer_training_eval_until_final": args.defer_training_eval_until_final,
         "progress_log_frequency": args.progress_log_frequency,
         "reset_source_photometry_branch": args.reset_source_photometry_branch,
         "reset_temporal_event_heads": args.reset_temporal_event_heads,
