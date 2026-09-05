@@ -572,8 +572,23 @@ def _paired_ranking_loss(
 ) -> torch.Tensor:
     """Rank each injected target-transit view above its matched null view."""
 
-    logits = prediction["global_event_logits"].reshape(-1)
-    targets = batch.target.reshape(-1).to(dtype=torch.float32)
+    return _paired_ranking_loss_for_logits(
+        prediction["global_event_logits"],
+        batch.target,
+        margin=margin,
+    )
+
+
+def _paired_ranking_loss_for_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    margin: float,
+) -> torch.Tensor:
+    """Rank paired synthetic logits with shared null/target ordering."""
+
+    logits = logits.reshape(-1)
+    targets = targets.reshape(-1).to(dtype=torch.float32, device=logits.device)
     if logits.numel() < 2:
         return logits.new_zeros(())
     pair_count = logits.numel() // 2
@@ -623,6 +638,36 @@ def _auxiliary_event_head_loss(
         )
     if not terms:
         return target.new_zeros(())
+    return torch.stack(terms).mean()
+
+
+def _auxiliary_paired_ranking_loss(
+    prediction: dict[str, torch.Tensor],
+    batch: AstroMambaHTrainingBatch,
+    *,
+    margin: float,
+) -> torch.Tensor:
+    """Pair-rank each compact event evidence head used by the global logit."""
+
+    targets = batch.target
+    terms: list[torch.Tensor] = []
+    for name in (
+        "source_photometry_event_logits",
+        "source_dip_event_logits",
+        "temporal_multiscale_event_logits",
+        "temporal_feature_fusion_event_logits",
+        "pooled_backbone_event_logits",
+    ):
+        logits = prediction.get(name)
+        if isinstance(logits, torch.Tensor) and logits.reshape(-1).numel() == targets.reshape(-1).numel():
+            terms.append(_paired_ranking_loss_for_logits(logits, targets, margin=margin))
+    source_event_logits = prediction.get("source_event_logits")
+    if isinstance(source_event_logits, torch.Tensor) and source_event_logits.ndim == 2:
+        direct_source_logits = source_event_logits[:, :1]
+        if direct_source_logits.reshape(-1).numel() == targets.reshape(-1).numel():
+            terms.append(_paired_ranking_loss_for_logits(direct_source_logits, targets, margin=margin))
+    if not terms:
+        return targets.new_zeros(())
     return torch.stack(terms).mean()
 
 
@@ -912,6 +957,12 @@ def main() -> int:
         help="optional BCE weight for directly supervising compact event evidence heads",
     )
     parser.add_argument(
+        "--auxiliary-paired-ranking-weight",
+        type=float,
+        default=0.0,
+        help="optional pair-ranking weight for compact event evidence heads",
+    )
+    parser.add_argument(
         "--training-eval-frequency",
         type=int,
         default=1,
@@ -988,6 +1039,8 @@ def main() -> int:
         raise ValueError("paired-ranking-margin must be non-negative")
     if args.auxiliary_event_head_weight < 0.0:
         raise ValueError("auxiliary-event-head-weight must be non-negative")
+    if args.auxiliary_paired_ranking_weight < 0.0:
+        raise ValueError("auxiliary-paired-ranking-weight must be non-negative")
     if args.training_eval_frequency < 1:
         raise ValueError("training-eval-frequency must be positive")
     if args.progress_log_frequency < 0:
@@ -1103,6 +1156,12 @@ def main() -> int:
                         output,
                         batch,
                     )
+                if args.auxiliary_paired_ranking_weight > 0.0:
+                    loss = loss + args.auxiliary_paired_ranking_weight * _auxiliary_paired_ranking_loss(
+                        output,
+                        batch,
+                        margin=args.paired_ranking_margin,
+                    )
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite synthetic loss at step {global_step}")
             loss.backward()
@@ -1203,6 +1262,7 @@ def main() -> int:
                 "paired_ranking_weight": args.paired_ranking_weight,
                 "paired_ranking_margin": args.paired_ranking_margin,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
+                "auxiliary_paired_ranking_weight": args.auxiliary_paired_ranking_weight,
                 "training_eval_frequency": args.training_eval_frequency,
                 "defer_training_eval_until_final": args.defer_training_eval_until_final,
                 "progress_log_frequency": args.progress_log_frequency,
@@ -1301,6 +1361,7 @@ def main() -> int:
         "paired_ranking_weight": args.paired_ranking_weight,
         "paired_ranking_margin": args.paired_ranking_margin,
         "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
+        "auxiliary_paired_ranking_weight": args.auxiliary_paired_ranking_weight,
         "training_eval_frequency": args.training_eval_frequency,
         "defer_training_eval_until_final": args.defer_training_eval_until_final,
         "progress_log_frequency": args.progress_log_frequency,
