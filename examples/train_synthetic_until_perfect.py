@@ -29,7 +29,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 20
+CACHE_FORMAT_VERSION = 21
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -153,6 +153,7 @@ def _sample_target_event_config(
     *,
     transit_radius_ratio_min: float = 0.006,
     transit_radius_ratio_max: float = 0.04,
+    transit_period_days: float | None = None,
 ) -> SyntheticConfig:
     """Vary target-transit morphology while keeping every positive observable.
 
@@ -172,7 +173,11 @@ def _sample_target_event_config(
     epoch_offset = float(rng.uniform(0.04, max(0.041, window_days - 0.035)))
     return replace(
         generator_config,
-        transit_period_days=float(rng.uniform(2.0, 30.0)),
+        transit_period_days=(
+            float(transit_period_days)
+            if transit_period_days is not None
+            else float(rng.uniform(2.0, 30.0))
+        ),
         transit_epoch_offset_days=epoch_offset,
         transit_duration_hours=float(rng.uniform(1.5, 6.0)),
         transit_radius_ratio=float(rng.uniform(transit_radius_ratio_min, transit_radius_ratio_max)),
@@ -184,9 +189,12 @@ def _sample_target_event_config(
 def _apply_curriculum_overrides(
     generator_config: SyntheticConfig,
     *,
-    field_star_count: int | None,
-    field_planet_probability: float | None,
-    stellar_brightness_noise_sigma: float | None,
+    field_star_count: int | None = None,
+    field_planet_probability: float | None = None,
+    stellar_brightness_noise_sigma: float | None = None,
+    visits: int | None = None,
+    local_steps: int | None = None,
+    visit_spacing_days: float | None = None,
 ) -> SyntheticConfig:
     """Apply explicit synthetic difficulty controls for staged curricula."""
 
@@ -197,6 +205,12 @@ def _apply_curriculum_overrides(
         updates["field_planet_probability"] = field_planet_probability
     if stellar_brightness_noise_sigma is not None:
         updates["stellar_brightness_noise_sigma"] = stellar_brightness_noise_sigma
+    if visits is not None:
+        updates["visits"] = visits
+    if local_steps is not None:
+        updates["local_steps"] = local_steps
+    if visit_spacing_days is not None:
+        updates["visit_spacing_days"] = visit_spacing_days
     return replace(generator_config, **updates) if updates else generator_config
 
 
@@ -208,8 +222,9 @@ def _sample_invalid_exposures(
 
     if rng.random() >= 0.25:
         return ()
+    visit = int(rng.integers(0, generator_config.visits))
     step = int(rng.integers(0, generator_config.local_steps))
-    return ((0, step),)
+    return ((visit, step),)
 
 
 def _match_real_adapter_context(
@@ -236,11 +251,22 @@ def _match_real_adapter_context(
          np.full_like(mid, cadence_days), np.ones_like(mid)),
         axis=-1,
     ).astype(np.float32)[None, ...]
-    result["long_time"] = np.asarray(
-        [float(finite_mid.min() - center), float(finite_mid.max() - center),
-         float(finite_mid.size), float(finite_mid.max() - finite_mid.min()), 1.0],
-        dtype=np.float32,
-    )[None, None, :]
+    long_time_rows: list[list[float]] = []
+    for visit_mid in mid:
+        finite_visit_mid = visit_mid[np.isfinite(visit_mid)]
+        if finite_visit_mid.size:
+            long_time_rows.append(
+                [
+                    float(finite_visit_mid.min() - center),
+                    float(finite_visit_mid.max() - center),
+                    float(finite_visit_mid.size),
+                    float(finite_visit_mid.max() - finite_visit_mid.min()),
+                    1.0,
+                ]
+            )
+        else:
+            long_time_rows.append([0.0, 0.0, 0.0, 0.0, 0.0])
+    result["long_time"] = np.asarray(long_time_rows, dtype=np.float32)[None, :, :]
     result["geometry"] = np.zeros_like(result["geometry"], dtype=np.float32)
 
     raster = result["raster"]
@@ -365,6 +391,7 @@ def _generate_pair(
     *,
     transit_radius_ratio_min: float = 0.006,
     transit_radius_ratio_max: float = 0.04,
+    transit_period_days: float | None = None,
 ) -> tuple[list[dict[str, np.ndarray]], list[float], list[tuple[float, float]]]:
     """Generate one null/injected pair with an isolated deterministic seed."""
 
@@ -375,6 +402,7 @@ def _generate_pair(
             sample_index,
             transit_radius_ratio_min=transit_radius_ratio_min,
             transit_radius_ratio_max=transit_radius_ratio_max,
+            transit_period_days=transit_period_days,
         ),
         seed=generator_config.seed + sample_index,
         source_x=source_x,
@@ -425,6 +453,7 @@ def _make_batch(
     *,
     transit_radius_ratio_min: float = 0.006,
     transit_radius_ratio_max: float = 0.04,
+    transit_period_days: float | None = None,
 ) -> AstroMambaHTrainingBatch:
     cached_arrays: dict[str, np.ndarray] | None = None
     cached_labels: np.ndarray | None = None
@@ -467,6 +496,7 @@ def _make_batch(
                     index,
                     transit_radius_ratio_min=transit_radius_ratio_min,
                     transit_radius_ratio_max=transit_radius_ratio_max,
+                    transit_period_days=transit_period_days,
                 ),
                 pair_indices,
             )
@@ -478,6 +508,7 @@ def _make_batch(
                     index,
                     transit_radius_ratio_min=transit_radius_ratio_min,
                     transit_radius_ratio_max=transit_radius_ratio_max,
+                    transit_period_days=transit_period_days,
                 ),
                 pair_indices,
             )
@@ -516,7 +547,7 @@ def _make_batch(
     source_target = np.stack(
         [
             _compact_source_target_map(
-                visits=1,
+                visits=generator_config.visits,
                 steps=generator_config.local_steps,
                 x=float(source_x),
                 y=float(source_y),
@@ -883,6 +914,7 @@ def _evaluate(
     *,
     transit_radius_ratio_min: float = 0.006,
     transit_radius_ratio_max: float = 0.04,
+    transit_period_days: float | None = None,
     progress_label: str | None = None,
     progress_epoch: int | None = None,
     progress_log_frequency: int = 0,
@@ -902,6 +934,7 @@ def _evaluate(
                 _batch_cache_path(cache_dir, start_index + offset, count),
                 transit_radius_ratio_min=transit_radius_ratio_min,
                 transit_radius_ratio_max=transit_radius_ratio_max,
+                transit_period_days=transit_period_days,
             )
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
                 output = model(batch)
@@ -1108,6 +1141,26 @@ def main() -> int:
         help="override target-star brightness fluctuation sigma for staged synthetic curricula",
     )
     parser.add_argument(
+        "--visits",
+        type=int,
+        help="override the number of observation visits per synthetic sample",
+    )
+    parser.add_argument(
+        "--local-steps",
+        type=int,
+        help="override the number of cadences per visit",
+    )
+    parser.add_argument(
+        "--visit-spacing-days",
+        type=float,
+        help="override spacing between repeated synthetic observation visits",
+    )
+    parser.add_argument(
+        "--transit-period-days",
+        type=float,
+        help="use a fixed target transit period; set equal to visit spacing for repeated visit transits",
+    )
+    parser.add_argument(
         "--transit-radius-ratio-min",
         type=float,
         default=0.006,
@@ -1158,6 +1211,14 @@ def main() -> int:
         raise ValueError("field-planet-probability must be in [0, 1]")
     if args.stellar_brightness_noise_sigma is not None and args.stellar_brightness_noise_sigma < 0.0:
         raise ValueError("stellar-brightness-noise-sigma must be non-negative")
+    if args.visits is not None and args.visits < 1:
+        raise ValueError("visits must be positive")
+    if args.local_steps is not None and args.local_steps < 1:
+        raise ValueError("local-steps must be positive")
+    if args.visit_spacing_days is not None and args.visit_spacing_days <= 0.0:
+        raise ValueError("visit-spacing-days must be positive")
+    if args.transit_period_days is not None and args.transit_period_days <= 0.0:
+        raise ValueError("transit-period-days must be positive")
     if args.transit_radius_ratio_min < 0.0 or args.transit_radius_ratio_max < 0.0:
         raise ValueError("transit radius ratio bounds must be non-negative")
     if args.transit_radius_ratio_min > args.transit_radius_ratio_max:
@@ -1217,6 +1278,9 @@ def main() -> int:
         field_star_count=args.field_star_count,
         field_planet_probability=args.field_planet_probability,
         stellar_brightness_noise_sigma=args.stellar_brightness_noise_sigma,
+        visits=args.visits,
+        local_steps=args.local_steps,
+        visit_spacing_days=args.visit_spacing_days,
     )
     cache_dir = args.cache_dir or args.output_checkpoint.parent / "multistar-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1247,6 +1311,7 @@ def main() -> int:
                 _batch_cache_path(cache_dir, args.start_index + offset, count),
                 transit_radius_ratio_min=args.transit_radius_ratio_min,
                 transit_radius_ratio_max=args.transit_radius_ratio_max,
+                transit_period_days=args.transit_period_days,
             )
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=device.type == "cuda"):
@@ -1317,6 +1382,7 @@ def main() -> int:
             cache_dir,
             transit_radius_ratio_min=args.transit_radius_ratio_min,
             transit_radius_ratio_max=args.transit_radius_ratio_max,
+            transit_period_days=args.transit_period_days,
             progress_label="holdout",
             progress_epoch=epoch,
             progress_log_frequency=args.progress_log_frequency,
@@ -1343,6 +1409,7 @@ def main() -> int:
                 cache_dir,
                 transit_radius_ratio_min=args.transit_radius_ratio_min,
                 transit_radius_ratio_max=args.transit_radius_ratio_max,
+                transit_period_days=args.transit_period_days,
                 progress_label="training",
                 progress_epoch=epoch,
                 progress_log_frequency=args.progress_log_frequency,
@@ -1394,6 +1461,10 @@ def main() -> int:
                 "field_star_count": generator_config.field_star_count,
                 "field_planet_probability": generator_config.field_planet_probability,
                 "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
+                "visits": generator_config.visits,
+                "local_steps": generator_config.local_steps,
+                "visit_spacing_days": generator_config.visit_spacing_days,
+                "transit_period_days": args.transit_period_days,
                 "transit_radius_ratio_min": args.transit_radius_ratio_min,
                 "transit_radius_ratio_max": args.transit_radius_ratio_max,
                 "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
@@ -1422,6 +1493,7 @@ def main() -> int:
                     cache_dir,
                     transit_radius_ratio_min=args.transit_radius_ratio_min,
                     transit_radius_ratio_max=args.transit_radius_ratio_max,
+                    transit_period_days=args.transit_period_days,
                     progress_label="training",
                     progress_epoch=epoch,
                     progress_log_frequency=args.progress_log_frequency,
@@ -1453,6 +1525,7 @@ def main() -> int:
             cache_dir,
             transit_radius_ratio_min=args.transit_radius_ratio_min,
             transit_radius_ratio_max=args.transit_radius_ratio_max,
+            transit_period_days=args.transit_period_days,
             progress_label="training",
             progress_epoch=best_epoch,
             progress_log_frequency=args.progress_log_frequency,
@@ -1496,6 +1569,10 @@ def main() -> int:
         "field_star_count": generator_config.field_star_count,
         "field_planet_probability": generator_config.field_planet_probability,
         "stellar_brightness_noise_sigma": generator_config.stellar_brightness_noise_sigma,
+        "visits": generator_config.visits,
+        "local_steps": generator_config.local_steps,
+        "visit_spacing_days": generator_config.visit_spacing_days,
+        "transit_period_days": args.transit_period_days,
         "transit_radius_ratio_min": args.transit_radius_ratio_min,
         "transit_radius_ratio_max": args.transit_radius_ratio_max,
         "source_position_policy": "deterministic_noncentral_source_inside_compact_detector_plus_noncentered_canvas_offset",
