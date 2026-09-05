@@ -29,7 +29,7 @@ from training.harness import event_only_loss_fn, source_event_loss_fn  # noqa: E
 
 
 RSS_CAP_BYTES = 1_200_000_000  # strict 1.2 GB host RSS ceiling
-CACHE_FORMAT_VERSION = 17
+CACHE_FORMAT_VERSION = 18
 
 
 def _robust_temporal_score(values: np.ndarray, uncertainty: np.ndarray) -> np.ndarray:
@@ -341,6 +341,24 @@ def _embed_source_xy(source_xy: np.ndarray, *, detector: int = 8, canvas: int = 
     return xy
 
 
+def _compact_source_target_map(
+    visits: int,
+    steps: int,
+    x: float,
+    y: float,
+    *,
+    height: int = 4,
+    width: int = 4,
+) -> np.ndarray:
+    """Create source-proposal supervision at the compact model's map scale."""
+
+    yy, xx = np.mgrid[:height, :width]
+    center_x = x * max(width - 1, 1)
+    center_y = y * max(height - 1, 1)
+    target = np.exp(-0.5 * (((xx - center_x) / 0.75) ** 2 + ((yy - center_y) / 0.75) ** 2))
+    return np.broadcast_to(target.astype(np.float32), (visits, steps, height, width)).copy()
+
+
 def _generate_pair(
     generator_config: SyntheticConfig,
     sample_index: int,
@@ -495,6 +513,18 @@ def _make_batch(
     # detector-local coordinates and are converted before tensor creation.
     if generated:
         cached_source_xy = _embed_source_xy(cached_source_xy)
+    source_target = np.stack(
+        [
+            _compact_source_target_map(
+                visits=1,
+                steps=generator_config.local_steps,
+                x=float(source_x),
+                y=float(source_y),
+            )
+            for source_x, source_y in cached_source_xy
+        ],
+        axis=0,
+    )
 
     arrays = {name: torch.from_numpy(value) for name, value in cached_arrays.items()}
     # Keep trainable parameters and input tensors FP32. CUDA autocast is used
@@ -515,7 +545,8 @@ def _make_batch(
         inputs=inputs,
         target=torch.tensor(cached_labels[:, None], dtype=torch.float32, device=device),
         auxiliary_targets={
-            "source_event": torch.tensor(cached_labels[:, None], dtype=torch.float32, device=device)
+            "source": torch.from_numpy(source_target).to(device=device, dtype=torch.float32),
+            "source_event": torch.tensor(cached_labels[:, None], dtype=torch.float32, device=device),
         },
     )
 
