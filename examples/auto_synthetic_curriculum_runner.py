@@ -26,9 +26,14 @@ class Stage:
     stellar_brightness_noise_sigma: float
     transit_radius_ratio_min: float
     transit_radius_ratio_max: float
+    visits: int
+    local_steps: int
+    visit_spacing_days: float
+    transit_period_days: float
     learning_rate: float
     negative_loss_weight: float
     paired_ranking_weight: float
+    auxiliary_paired_ranking_weight: float
     max_epochs: int
 
 
@@ -41,9 +46,14 @@ def _default_stages() -> list[Stage]:
             stellar_brightness_noise_sigma=0.0003,
             transit_radius_ratio_min=0.045,
             transit_radius_ratio_max=0.09,
+            visits=3,
+            local_steps=16,
+            visit_spacing_days=3.0,
+            transit_period_days=3.0,
             learning_rate=3.0e-4,
             negative_loss_weight=1.0,
             paired_ranking_weight=0.25,
+            auxiliary_paired_ranking_weight=0.02,
             max_epochs=4,
         ),
         Stage(
@@ -53,9 +63,14 @@ def _default_stages() -> list[Stage]:
             stellar_brightness_noise_sigma=0.0005,
             transit_radius_ratio_min=0.03,
             transit_radius_ratio_max=0.08,
+            visits=3,
+            local_steps=16,
+            visit_spacing_days=3.0,
+            transit_period_days=3.0,
             learning_rate=1.0e-4,
             negative_loss_weight=1.0,
             paired_ranking_weight=0.5,
+            auxiliary_paired_ranking_weight=0.02,
             max_epochs=4,
         ),
         Stage(
@@ -65,9 +80,14 @@ def _default_stages() -> list[Stage]:
             stellar_brightness_noise_sigma=0.0008,
             transit_radius_ratio_min=0.012,
             transit_radius_ratio_max=0.05,
+            visits=4,
+            local_steps=16,
+            visit_spacing_days=3.0,
+            transit_period_days=3.0,
             learning_rate=5.0e-5,
             negative_loss_weight=1.1,
             paired_ranking_weight=0.5,
+            auxiliary_paired_ranking_weight=0.02,
             max_epochs=4,
         ),
         Stage(
@@ -77,9 +97,14 @@ def _default_stages() -> list[Stage]:
             stellar_brightness_noise_sigma=0.0015,
             transit_radius_ratio_min=0.006,
             transit_radius_ratio_max=0.04,
+            visits=4,
+            local_steps=16,
+            visit_spacing_days=2.7,
+            transit_period_days=2.7,
             learning_rate=2.0e-5,
             negative_loss_weight=1.2,
             paired_ranking_weight=0.5,
+            auxiliary_paired_ranking_weight=0.02,
             max_epochs=4,
         ),
     ]
@@ -143,9 +168,14 @@ def main() -> int:
     parser.add_argument("--start-index", type=int, default=5_000_000)
     parser.add_argument("--holdout-start-index", type=int, default=6_000_000)
     parser.add_argument("--reset-source-photometry-branch", action="store_true")
+    parser.add_argument("--reset-source-tokenizer", action="store_true")
     parser.add_argument("--reset-temporal-event-heads", action="store_true")
+    parser.add_argument("--zero-event-photometry-weight", action="store_true")
+    parser.add_argument("--initialize-source-dip-event-prior", action="store_true")
     parser.add_argument("--train-only-event-heads", action="store_true")
+    parser.add_argument("--train-source-tokenizer-with-event-heads", action="store_true")
     parser.add_argument("--train-only-event-calibration", action="store_true")
+    parser.add_argument("--defer-training-eval-until-final", action="store_true")
     parser.add_argument("--training-eval-frequency", type=int, default=1)
     parser.add_argument("--progress-log-frequency", type=int, default=0)
     args = parser.parse_args()
@@ -226,6 +256,8 @@ def main() -> int:
                 "0.5",
                 "--auxiliary-event-head-weight",
                 str(args.auxiliary_event_head_weight),
+                "--auxiliary-paired-ranking-weight",
+                str(stage.auxiliary_paired_ranking_weight),
                 "--training-eval-frequency",
                 str(args.training_eval_frequency),
                 "--progress-log-frequency",
@@ -240,6 +272,14 @@ def main() -> int:
                 str(stage.transit_radius_ratio_min),
                 "--transit-radius-ratio-max",
                 str(stage.transit_radius_ratio_max),
+                "--visits",
+                str(stage.visits),
+                "--local-steps",
+                str(stage.local_steps),
+                "--visit-spacing-days",
+                str(stage.visit_spacing_days),
+                "--transit-period-days",
+                str(stage.transit_period_days),
                 "--device",
                 args.device,
                 "--seed",
@@ -257,12 +297,22 @@ def main() -> int:
                 command.extend(["--input-checkpoint", str(current_checkpoint)])
             if args.reset_source_photometry_branch and ordinal == 0:
                 command.append("--reset-source-photometry-branch")
+            if args.reset_source_tokenizer and ordinal == 0:
+                command.append("--reset-source-tokenizer")
             if args.reset_temporal_event_heads and ordinal == 0:
                 command.append("--reset-temporal-event-heads")
+            if args.zero_event_photometry_weight and ordinal == 0:
+                command.append("--zero-event-photometry-weight")
+            if args.initialize_source_dip_event_prior and ordinal == 0:
+                command.append("--initialize-source-dip-event-prior")
             if args.train_only_event_heads:
                 command.append("--train-only-event-heads")
+            if args.train_source_tokenizer_with_event_heads:
+                command.append("--train-source-tokenizer-with-event-heads")
             if args.train_only_event_calibration:
                 command.append("--train-only-event-calibration")
+            if args.defer_training_eval_until_final:
+                command.append("--defer-training-eval-until-final")
 
             exit_code = _run_child(command, cwd=repo)
             report_path = output_checkpoint.with_suffix(".report.json")
@@ -291,8 +341,14 @@ def main() -> int:
                 "loss_mode": args.loss_mode,
                 "auxiliary_event_head_weight": args.auxiliary_event_head_weight,
                 "train_only_event_calibration": args.train_only_event_calibration,
+                "train_source_tokenizer_with_event_heads": args.train_source_tokenizer_with_event_heads,
+                "defer_training_eval_until_final": args.defer_training_eval_until_final,
                 "training_eval_frequency": args.training_eval_frequency,
                 "progress_log_frequency": args.progress_log_frequency,
+                "visits": stage.visits,
+                "local_steps": stage.local_steps,
+                "visit_spacing_days": stage.visit_spacing_days,
+                "transit_period_days": stage.transit_period_days,
                 "best_synthetic_checkpoint": str(best_synthetic_checkpoint) if best_synthetic_checkpoint else None,
                 "best_synthetic_errors": best_synthetic_errors,
                 "rss_cap_bytes": args.rss_cap_bytes,
