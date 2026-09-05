@@ -751,10 +751,14 @@ def _evaluate(
     *,
     transit_radius_ratio_min: float = 0.006,
     transit_radius_ratio_max: float = 0.04,
+    progress_label: str | None = None,
+    progress_epoch: int | None = None,
+    progress_log_frequency: int = 0,
 ) -> dict[str, object]:
     model.eval()
     labels: list[int] = []
     probabilities: list[float] = []
+    batches_total = math.ceil(pair_count / batch_pairs)
     with torch.inference_mode():
         for offset in range(0, pair_count, batch_pairs):
             count = min(batch_pairs, pair_count - offset)
@@ -772,6 +776,24 @@ def _evaluate(
             probabilities.extend(float(value) for value in output["global_event_logits"].float().sigmoid().cpu())
             labels.extend([int(value) for value in batch.target.reshape(-1).cpu()])
             del batch, output
+            batches_done = offset // batch_pairs + 1
+            if progress_label and progress_log_frequency and batches_done % progress_log_frequency == 0:
+                print(
+                    json.dumps(
+                        {
+                            "event": "eval_batch",
+                            "label": progress_label,
+                            "epoch": progress_epoch,
+                            "batches_done": batches_done,
+                            "batches_total": batches_total,
+                            "samples_done": len(labels),
+                            "samples_total": pair_count * 2,
+                            "rss_bytes": _rss(),
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
     predicted = [int(value >= 0.5) for value in probabilities]
     correct = sum(prediction == label for prediction, label in zip(predicted, labels))
     best_threshold = 0.5
@@ -1112,6 +1134,9 @@ def main() -> int:
             cache_dir,
             transit_radius_ratio_min=args.transit_radius_ratio_min,
             transit_radius_ratio_max=args.transit_radius_ratio_max,
+            progress_label="holdout",
+            progress_epoch=epoch,
+            progress_log_frequency=args.progress_log_frequency,
         )
         synthetic_improved = best_holdout is None or final_holdout["errors"] < best_holdout["errors"]
         should_stop = (
@@ -1135,6 +1160,9 @@ def main() -> int:
                 cache_dir,
                 transit_radius_ratio_min=args.transit_radius_ratio_min,
                 transit_radius_ratio_max=args.transit_radius_ratio_max,
+                progress_label="training",
+                progress_epoch=epoch,
+                progress_log_frequency=args.progress_log_frequency,
             )
             if should_score_training
             else None
@@ -1205,6 +1233,9 @@ def main() -> int:
                     cache_dir,
                     transit_radius_ratio_min=args.transit_radius_ratio_min,
                     transit_radius_ratio_max=args.transit_radius_ratio_max,
+                    progress_label="training",
+                    progress_epoch=epoch,
+                    progress_log_frequency=args.progress_log_frequency,
                 )
                 record["training"] = final_training
             best_epoch = epoch
